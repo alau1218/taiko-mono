@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"math/rand"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 
 	// Alias the standard library math package
@@ -34,9 +36,11 @@ import (
 
 type ProposerTestSuite struct {
 	testutils.ClientTestSuite
-	s      *blob.Syncer
-	p      *Proposer
-	cancel context.CancelFunc
+	s         *blob.Syncer
+	p         *Proposer
+	cancel    context.CancelFunc
+	proposeCh chan struct{}
+	wg        sync.WaitGroup
 }
 
 func (s *ProposerTestSuite) SetupTest() {
@@ -65,6 +69,7 @@ func (s *ProposerTestSuite) SetupTest() {
 	p := new(Proposer)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
 	jwtSecret, err := jwt.ParseSecretFromFile(os.Getenv("JWT_SECRET"))
 	s.Nil(err)
 	s.NotEmpty(jwtSecret)
@@ -117,10 +122,14 @@ func (s *ProposerTestSuite) SetupTest() {
 			TxSendTimeout:             txmgr.DefaultBatcherFlagValues.TxSendTimeout,
 			TxNotInMempoolTimeout:     txmgr.DefaultBatcherFlagValues.TxNotInMempoolTimeout,
 		},
+		RedisEnabled: true,
+		RedisConfig: &RedisConfig{
+			Address:  "localhost:6379",
+			Password: "",
+		},
 	}, nil, nil))
 
 	s.p = p
-	s.cancel = cancel
 	log.Info("Proposer initialized successfully.")
 }
 
@@ -222,17 +231,6 @@ func (s *ProposerTestSuite) TestTxPoolContentWithMinTip() {
 
 	s.Nil(s.p.ProposeOp(context.Background()))
 	s.Nil(s.s.ProcessL1Blocks(context.Background()))
-
-	// Fetch the latest block from L2
-	latestBlock, err := s.RPCClient.L2.BlockByNumber(context.Background(), nil)
-	s.Nil(err)
-
-	// Extract transactions from the latest block
-	transactions := latestBlock.Transactions()
-
-	// Log the number of transactions fetched
-	log.Info("Fetched transactions from L2 latest block", "count", len(transactions))
-
 }
 
 func (s *ProposerTestSuite) TestGetRpcPoolContent() {
@@ -443,12 +441,6 @@ func (s *ProposerTestSuite) TestUpdateProposingTicker() {
 	s.NotPanics(s.p.updateProposingTicker)
 }
 
-func (s *ProposerTestSuite) TestStartClose() {
-	s.Nil(s.p.Start())
-	s.cancel()
-	s.NotPanics(func() { s.p.Close(s.p.ctx) })
-}
-
 func (s *ProposerTestSuite) TestCalculateInitialWaitTime() {
 	// Generate a random offset within the slot time
 	timeLapsedSinceLastSlot := float64(rand.Intn(int(SlotTime*1000))) / 1000.0 // Random milliseconds within the slot
@@ -470,6 +462,60 @@ func (s *ProposerTestSuite) TestCalculateInitialWaitTime() {
 	s.InDelta(expectedWaitTime, actualWaitTime.Seconds(), 0.001, "The initial wait time should align with T - 2 seconds")
 
 	log.Info("Finished TestCalculateInitialWaitTime")
+}
+
+func (s *ProposerTestSuite) TestProposerStartAndPropose() {
+	// Define a context with timeout to avoid indefinite waiting
+	ctx, cancel := context.WithTimeout(context.Background(),
+		time.Duration(4)*time.Duration(SlotTime)*time.Second+5*time.Second)
+	defer cancel()
+
+	// Slice to store proposal timestamps
+	proposalTimes := make([]time.Time, 0, 2)
+
+	// Start the Proposer
+	currentProposedAt := s.p.lastProposedAt
+	log.Info("Starting the Proposer", "lastProposedAt", currentProposedAt)
+	err := s.p.Start()
+	s.Nil(err, "Failed to start the Proposer")
+
+	// Channel to signal goroutine to exit
+	done := make(chan struct{})
+
+	// Goroutine to monitor proposal times
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				if currentProposedAt != s.p.lastProposedAt {
+					// Record the time when lastProposedAt changed
+					proposalTimes = append(proposalTimes, s.p.lastProposedAt)
+					currentProposedAt = s.p.lastProposedAt
+				}
+				if len(proposalTimes) >= 2 {
+					close(done) // Signal that we are done
+					return
+				}
+				time.Sleep(500 * time.Millisecond) // Polling interval
+			}
+		}
+	}()
+
+	// Wait for the goroutine to signal completion
+	<-done
+
+	// Clean up by canceling the context and closing the proposer
+	log.Info("Cleaning up the Proposer")
+	s.cancel()
+	s.p.Close(context.Background())
+
+	assert.Equal(s.T(), 2, len(proposalTimes), "Should have done two proposals")
+	assert.Less(s.T(),
+		proposalTimes[1].Sub(proposalTimes[0]),
+		time.Duration(SlotTime*float64(time.Second))+100*time.Millisecond,
+		"The two proposal should be divided by SlotTime")
 }
 
 func TestProposerTestSuite(t *testing.T) {

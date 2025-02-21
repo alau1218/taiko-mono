@@ -112,11 +112,11 @@ var (
 	}
 	// Redis related.
 	RedisDBEndabled = &cli.BoolFlag{
-		Name:     "redis.db",
+		Name:     "redis.enabled",
 		Usage:    "If set to true, proposer will use Redis to store the transaction pool and related data",
 		Value:    false,
 		Category: proposerCategory,
-		EnvVars:  []string{"ENABLE_REDIS"},
+		EnvVars:  []string{"REDIS_ENABLED"},
 	}
 	RedisAddress = &cli.StringFlag{
 		Name:     "redis.address",
@@ -154,6 +154,7 @@ var ProposerFlags = MergeFlags(CommonFlags, []cli.Flag{
 	BlobAllowed,
 	FallbackToCalldata,
 	RevertProtectionEnabled,
+	RedisDBEndabled,
 	RedisAddress,
 	RedisPassword,
 }, TxmgrFlags)

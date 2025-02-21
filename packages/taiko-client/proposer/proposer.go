@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/redis/go-redis/v9"
 	"github.com/urfave/cli/v2"
 
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/bindings"
@@ -55,6 +56,8 @@ type Proposer struct {
 
 	ctx context.Context
 	wg  sync.WaitGroup
+
+	redisClient *redis.Client
 }
 
 const (
@@ -139,6 +142,19 @@ func (p *Proposer) InitFromConfig(
 		cfg.FallbackToCalldata,
 	)
 
+	if cfg.RedisEnabled {
+
+		p.redisClient = redis.NewClient(&redis.Options{
+			Addr:     cfg.RedisConfig.Address,
+			Password: cfg.RedisConfig.Password,
+			DB:       0, //Default DB
+		})
+		log.Info("Redis instantiated successfully", "address", cfg.RedisConfig.Address)
+	} else {
+		log.Info("Redis Info",
+			"RedisEnabled", cfg.RedisEnabled)
+	}
+
 	return nil
 }
 
@@ -146,12 +162,6 @@ func (p *Proposer) InitFromConfig(
 func (p *Proposer) Start() error {
 	p.wg.Add(1)
 	go func() {
-		// Calculate the initial wait time to align with the L1 block
-		// Get the time left in the current L1 block slot
-		timeLeftInSlot := p.getRemainingTimeLeftInL1Block()
-		initialWaitTime := p.calculateInitialWaitTime(timeLeftInSlot)
-		time.Sleep(initialWaitTime)
-
 		// Start the event loop
 		p.eventLoop()
 	}()
@@ -166,8 +176,7 @@ func (p *Proposer) eventLoop() {
 	}()
 
 	for {
-		log.Info("Event loop started")
-		// Fetch the L1 block time
+		log.Info("Event loop started", "Epochs", p.totalEpochs)
 		p.updateProposingTicker()
 
 		select {
@@ -204,6 +213,8 @@ func (p *Proposer) fetchPoolContent(filterPoolContent bool) ([]types.Transaction
 		minTip = 0
 	}
 
+	metrics.ProposerPoolContentFetchTime.Set(time.Since(startAt).Seconds())
+
 	// Fetch the pool content.
 	preBuiltTxList, err := p.rpc.GetPoolContent(
 		p.ctx,
@@ -218,8 +229,6 @@ func (p *Proposer) fetchPoolContent(filterPoolContent bool) ([]types.Transaction
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch transaction pool content: %w", err)
 	}
-
-	metrics.ProposerPoolContentFetchTime.Set(time.Since(startAt).Seconds())
 
 	txLists := []types.Transactions{}
 
@@ -389,6 +398,9 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		utils.WeiToEther(l1Cost),
 	)
 
+	//Update the lastProposedAt to the current time before getting to the last part
+	p.lastProposedAt = time.Now()
+
 	if totalEarnings.Cmp(l1Cost) > 0 {
 		log.Info("Expected profit, proposing transactions",
 			"profit", utils.WeiToEther(totalEarnings.Sub(totalEarnings, l1Cost)))
@@ -415,7 +427,6 @@ func (p *Proposer) ProposeTxLists(ctx context.Context, txLists []types.Transacti
 	if err := p.ProposeTxListOntake(ctx, txLists); err != nil {
 		return err
 	}
-	p.lastProposedAt = time.Now()
 	return nil
 }
 
@@ -493,11 +504,21 @@ func (p *Proposer) updateProposingTicker() {
 		p.proposingTimer.Stop()
 	}
 
-	// Calculate the wait duration to propose 2 seconds before the end of the L1 block
-	waitDuration := time.Duration(SlotTime) * time.Second
+	if p.totalEpochs == 0 {
+		// Calculate the initial wait time to align with the L1 block
+		// Get the time left in the current L1 block slot
+		timeLeftInSlot := p.getRemainingTimeLeftInL1Block()
+		initialWaitTime := p.calculateInitialWaitTime(timeLeftInSlot)
+		log.Info("We will sleep till our clock get aligned with the L1 block",
+			"initialWaitTime", initialWaitTime)
+		p.proposingTimer = time.NewTimer(initialWaitTime)
+	} else {
+		// we will wakeup the proposer every slottime
+		slotDuration := time.Duration(SlotTime) * time.Second
 
-	// Set the proposing timer
-	p.proposingTimer = time.NewTimer(waitDuration)
+		// Set the proposing timer
+		p.proposingTimer = time.NewTimer(slotDuration)
+	}
 }
 
 func (p *Proposer) getRemainingTimeLeftInL1Block() (timeLeft float64) {
