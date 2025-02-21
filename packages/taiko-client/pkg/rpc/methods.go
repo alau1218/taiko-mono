@@ -323,6 +323,27 @@ func (c *Client) CalculateBaseFee(
 	return baseFee, nil
 }
 
+func (c *Client) GetL2BaseFee(ctx context.Context, chainConfig *config.ChainConfig) (*big.Int, error) {
+	l1Head, err := c.L1.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	l2Head, err := c.L2.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return c.CalculateBaseFee(
+		ctx,
+		l2Head,
+		l1Head.Number,
+		chainConfig.IsOntake(new(big.Int).Add(l2Head.Number, common.Big1)),
+		&chainConfig.ProtocolConfigs.BaseFeeConfig,
+		uint64(time.Now().Unix()),
+	)
+}
+
 // GetPoolContent fetches the transactions list from L2 execution engine's transactions pool with given
 // upper limit.
 func (c *Client) GetPoolContent(
@@ -338,24 +359,7 @@ func (c *Client) GetPoolContent(
 	ctxWithTimeout, cancel := CtxWithTimeoutOrDefault(ctx, defaultTimeout)
 	defer cancel()
 
-	l1Head, err := c.L1.HeaderByNumber(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	l2Head, err := c.L2.HeaderByNumber(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	baseFee, err := c.CalculateBaseFee(
-		ctx,
-		l2Head,
-		l1Head.Number,
-		chainConfig.IsOntake(new(big.Int).Add(l2Head.Number, common.Big1)),
-		&chainConfig.ProtocolConfigs.BaseFeeConfig,
-		uint64(time.Now().Unix()),
-	)
+	baseFee, err := c.GetL2BaseFee(ctx, chainConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -722,10 +726,7 @@ func (c *Client) getSyncedL1SnippetFromAnchor(
 
 		l1StateRoot, ok = args["_l1StateRoot"].([32]byte)
 		if !ok {
-			return common.Hash{},
-				0,
-				0,
-				errors.New("failed to parse l1StateRoot from anchor transaction calldata")
+			return common.Hash{}, 0, 0, errors.New("failed to parse l1StateRoot from anchor transaction calldata")
 		}
 		l1Height, ok = args["_l1BlockId"].(uint64)
 		if !ok {

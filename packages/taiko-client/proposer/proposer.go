@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"math/rand"
+	"sort"
 	"sync"
 	"time"
 
@@ -25,6 +25,8 @@ import (
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/pkg/rpc"
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/pkg/utils"
 	builder "github.com/taikoxyz/taiko-mono/packages/taiko-client/proposer/transaction_builder"
+
+	"github.com/go-redis/redis/v9"
 )
 
 // Proposer keep proposing new transactions from L2 execution engine's tx pool at a fixed interval.
@@ -55,7 +57,19 @@ type Proposer struct {
 
 	ctx context.Context
 	wg  sync.WaitGroup
+
+	redisClient *redis.Client
 }
+
+const (
+	//GenesisTime int64 = 1606824023 // Ethereum Beacon Chain Genesis Time (Dec 1, 2020)
+	GenesisTime          int64   = 1695902400 // Genesis Time for Holesky
+	SlotTime             float64 = 12.0       // Each slot lasts 12 seconds
+	TimeGapToPropose     float64 = 3.0        // Time gap to propose in seconds
+	MaxBlobSpaceSize             = 128 * 1024 // Define the maximum blob space size as 128 KB
+	BaseFeePctToProposer         = 75         // The percentage of the base fee that the proposer will receive
+	DefaultL1GasSpent    int64   = 150000     // The amount of gas spent on L1
+)
 
 // InitFromCli initializes the given proposer instance based on the command line flags.
 func (p *Proposer) InitFromCli(ctx context.Context, c *cli.Context) error {
@@ -135,7 +149,16 @@ func (p *Proposer) InitFromConfig(
 // Start starts the proposer's main loop.
 func (p *Proposer) Start() error {
 	p.wg.Add(1)
-	go p.eventLoop()
+	go func() {
+		// Calculate the initial wait time to align with the L1 block
+		// Get the time left in the current L1 block slot
+		timeLeftInSlot := p.getRemainingTimeLeftInL1Block()
+		initialWaitTime := p.calculateInitialWaitTime(timeLeftInSlot)
+		time.Sleep(initialWaitTime)
+
+		// Start the event loop
+		p.eventLoop()
+	}()
 	return nil
 }
 
@@ -147,6 +170,8 @@ func (p *Proposer) eventLoop() {
 	}()
 
 	for {
+		log.Info("Event loop started")
+		// Fetch the L1 block time
 		p.updateProposingTicker()
 
 		select {
@@ -201,10 +226,11 @@ func (p *Proposer) fetchPoolContent(filterPoolContent bool) ([]types.Transaction
 	metrics.ProposerPoolContentFetchTime.Set(time.Since(startAt).Seconds())
 
 	txLists := []types.Transactions{}
+
 	for i, txs := range preBuiltTxList {
 		// Filter the pool content if the filterPoolContent flag is set.
 		if txs.EstimatedGasUsed < p.MinGasUsed && txs.BytesLength < p.MinTxListBytes && filterPoolContent {
-			log.Info(
+			log.Error(
 				"Pool content skipped",
 				"index", i,
 				"estimatedGasUsed", txs.EstimatedGasUsed,
@@ -214,7 +240,33 @@ func (p *Proposer) fetchPoolContent(filterPoolContent bool) ([]types.Transaction
 			)
 			break
 		}
-		txLists = append(txLists, txs.TxList)
+
+		// Here we check if the BytesLength of the txList is greater than the maxBlobSpaceSize
+		if txs.BytesLength > MaxBlobSpaceSize {
+			sort.SliceStable(txs.TxList, func(i, j int) bool {
+				cmp := txs.TxList[i].GasTipCap().Cmp(txs.TxList[j].GasTipCap())
+				if cmp != 0 {
+					return cmp > 0
+				}
+				return txs.TxList[i].Gas() > txs.TxList[j].Gas()
+			})
+			var newTxList types.Transactions
+			var currentBlobSize uint64
+
+			for _, tx := range txs.TxList {
+				txSize := uint64(len(tx.Data()))
+				if currentBlobSize+txSize > MaxBlobSpaceSize {
+					break
+				}
+				newTxList = append(newTxList, tx)
+				currentBlobSize += txSize
+			}
+
+			txLists = append(txLists, newTxList)
+		} else {
+			// The txList is less than the MaxBlobSpaceSize, we can add it to the txLists
+			txLists = append(txLists, txs.TxList)
+		}
 	}
 	// If the pool content is empty and the checkPoolContent flag is not set, return an empty list.
 	if !filterPoolContent && len(txLists) == 0 {
@@ -254,8 +306,6 @@ func (p *Proposer) fetchPoolContent(filterPoolContent bool) ([]types.Transaction
 		txLists = localTxsLists
 	}
 
-	log.Info("Transactions lists count", "count", len(txLists))
-
 	return txLists, nil
 }
 
@@ -263,6 +313,13 @@ func (p *Proposer) fetchPoolContent(filterPoolContent bool) ([]types.Transaction
 // from L2 execution engine's tx pool, splitting them by proposing constraints,
 // and then proposing them to TaikoL1 contract.
 func (p *Proposer) ProposeOp(ctx context.Context) error {
+	startTime := time.Now()
+	defer func() {
+		totalDuration := time.Since(startTime)
+		metrics.ProposerTotalDuration.Set(totalDuration.Seconds())
+		log.Info("ProposeOp total duration", "duration", totalDuration)
+	}()
+
 	// Check if it's time to propose unfiltered pool content.
 	filterPoolContent := time.Now().Before(p.lastProposedAt.Add(p.MinProposingInternal))
 
@@ -277,8 +334,13 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		"lastProposedAt", p.lastProposedAt,
 	)
 
+	fetchStartTime := time.Now()
 	// Fetch pending L2 transactions from mempool.
 	txLists, err := p.fetchPoolContent(filterPoolContent)
+	fetchDuration := time.Since(fetchStartTime)
+	metrics.ProposerFetchPoolContentDuration.Set(fetchDuration.Seconds())
+	log.Info("Fetch pool content duration", "duration", fetchDuration, "numOfTxs", len(txLists[0]))
+
 	if err != nil {
 		return err
 	}
@@ -288,8 +350,67 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		return nil
 	}
 
-	// Propose the transactions lists.
-	return p.ProposeTxLists(ctx, txLists)
+	// Retrieve the L2 base fee
+	baseFee, err := p.rpc.GetL2BaseFee(ctx, p.chainConfig)
+	if err != nil {
+		log.Error("failed to get L2 base fee:", "error", err)
+		return nil
+	}
+
+	totalEarnings := new(big.Int).SetUint64(0)
+	for _, txs := range txLists {
+		for _, tx := range txs {
+
+			if tx.Gas() < 30000 {
+				discountedGas := tx.Gas() * 60 / 100 // Apply 40% discount
+				totalEarnings.Add(totalEarnings, new(big.Int).SetUint64(((baseFee.Uint64()*BaseFeePctToProposer)/100+tx.GasTipCap().Uint64())*discountedGas))
+			} else {
+				totalEarnings.Add(totalEarnings, new(big.Int).SetUint64(((baseFee.Uint64()*BaseFeePctToProposer)/100+tx.GasTipCap().Uint64())*tx.Gas()))
+			}
+		}
+		if err != nil {
+			log.Error("Failed to get current base fee", "error", err)
+			continue
+		}
+	}
+
+	// Get the L1 gas fee and blob fee
+	FeeHistory, err := p.rpc.L1.FeeHistory(ctx, 1, nil, []float64{90})
+	if err != nil {
+		log.Error("Failed to get fee history", "error", err)
+		return err
+	}
+
+	// Use the Add method to sum the base fee and reward
+	l1Cost := new(big.Int).Set(FeeHistory.BaseFee[1]) // Create a new big.Int and set it to BaseFee[1]
+	l1Cost.Add(l1Cost, FeeHistory.Reward[0][0])       // Add the priority fee to the base fee
+	l1Cost.Mul(l1Cost, big.NewInt(DefaultL1GasSpent)) // Multiply by 150000
+
+	log.Info("Earnings and L1 cost",
+		"totalEarnings",
+		utils.WeiToEther(totalEarnings),
+		"l1Cost",
+		utils.WeiToEther(l1Cost),
+	)
+
+	if totalEarnings.Cmp(l1Cost) > 0 {
+		log.Info("Expected profit, proposing transactions",
+			"profit", utils.WeiToEther(totalEarnings.Sub(totalEarnings, l1Cost)))
+		// Propose the transactions lists.
+		proposeStartTime := time.Now()
+		err = p.ProposeTxLists(ctx, txLists)
+
+		proposeDuration := time.Since(proposeStartTime)
+		metrics.ProposerProposeTxListsDuration.Set(proposeDuration.Seconds())
+		log.Info("ProposeTxLists duration", "duration", proposeDuration)
+
+		return err
+	} else {
+		log.Info("L1 cost is greater than total earnings, skipping proposal",
+			"Deficit",
+			utils.WeiToEther(l1Cost.Sub(l1Cost, totalEarnings)))
+		return nil
+	}
 }
 
 // ProposeTxList proposes the given transactions lists to TaikoL1 smart contract.
@@ -315,11 +436,13 @@ func (p *Proposer) ProposeTxListOntake(
 	)
 	for _, txs := range txLists {
 		txListBytes, err := rlp.EncodeToBytes(txs)
+
 		if err != nil {
 			return fmt.Errorf("failed to encode transactions: %w", err)
 		}
 
 		compressedTxListBytes, err := utils.Compress(txListBytes)
+
 		if err != nil {
 			return err
 		}
@@ -374,16 +497,21 @@ func (p *Proposer) updateProposingTicker() {
 		p.proposingTimer.Stop()
 	}
 
-	var duration time.Duration
-	if p.ProposeInterval != 0 {
-		duration = p.ProposeInterval
-	} else {
-		// Random number between 12 - 120
-		randomSeconds := rand.Intn(120-11) + 12 // nolint: gosec
-		duration = time.Duration(randomSeconds) * time.Second
-	}
+	// Calculate the wait duration to propose 2 seconds before the end of the L1 block
+	waitDuration := time.Duration(SlotTime) * time.Second
 
-	p.proposingTimer = time.NewTimer(duration)
+	// Set the proposing timer
+	p.proposingTimer = time.NewTimer(waitDuration)
+}
+
+func (p *Proposer) getRemainingTimeLeftInL1Block() (timeLeft float64) {
+	currentTime := float64(time.Now().UTC().UnixNano()) / 1e9 // Get current UTC time in seconds (float64)
+	elapsedTime := currentTime - float64(GenesisTime)
+
+	slot := int64(elapsedTime / float64(SlotTime))               // Compute current slot
+	timeLeft = SlotTime - (elapsedTime - float64(slot)*SlotTime) // Compute time left in slot
+
+	return timeLeft
 }
 
 // sendTx is the internal function to send a transaction with a selected tx manager.
@@ -411,4 +539,19 @@ func (p *Proposer) sendTx(ctx context.Context, txCandidate *txmgr.TxCandidate) e
 // Name returns the application name.
 func (p *Proposer) Name() string {
 	return "proposer"
+}
+
+func (p *Proposer) calculateInitialWaitTime(timeLeftInSlot float64) time.Duration {
+	// If the time left in the slot is less than TimeGapToPropose, wait for the next slot
+	if timeLeftInSlot < TimeGapToPropose {
+		timeLeftInSlot += float64(SlotTime)
+	}
+
+	// Calculate the initial wait time to align with the next L1 block
+	waitTime := timeLeftInSlot - TimeGapToPropose
+	if waitTime < 0 {
+		waitTime = 0 // Ensure wait time is not negative
+	}
+
+	return time.Duration(waitTime * float64(time.Second))
 }

@@ -36,6 +36,11 @@ var (
 	ProposerProposeByBlob          = factory.NewCounter(prometheus.CounterOpts{Name: "proposer_propose_by_blob"})
 	ProposerCostEstimationError    = factory.NewGauge(prometheus.GaugeOpts{Name: "proposer_cost_estimation_error"})
 
+	// New Metrics for ProposeOp
+	ProposerTotalDuration            = factory.NewGauge(prometheus.GaugeOpts{Name: "proposer_total_duration"})
+	ProposerFetchPoolContentDuration = factory.NewGauge(prometheus.GaugeOpts{Name: "proposer_fetch_pool_content_duration"})
+	ProposerProposeTxListsDuration   = factory.NewGauge(prometheus.GaugeOpts{Name: "proposer_propose_tx_lists_duration"})
+
 	// Prover
 	ProverLatestVerifiedIDGauge      = factory.NewGauge(prometheus.GaugeOpts{Name: "prover_latestVerified_id"})
 	ProverLatestProvenBlockIDGauge   = factory.NewGauge(prometheus.GaugeOpts{Name: "prover_latestProven_id"})

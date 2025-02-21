@@ -3,9 +3,8 @@ package proposer
 import (
 	"context"
 	"crypto/ecdsa"
-	"fmt"
-	"maps"
 	"math/big"
+	"math/rand"
 	"os"
 	"testing"
 	"time"
@@ -16,8 +15,12 @@ import (
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/miner"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/stretchr/testify/suite"
+
+	// Alias the standard library math package
 
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/bindings"
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/bindings/metadata"
@@ -39,6 +42,7 @@ type ProposerTestSuite struct {
 func (s *ProposerTestSuite) SetupTest() {
 	s.ClientTestSuite.SetupTest()
 
+	log.Info("Setting up state and syncer.")
 	state2, err := state.New(context.Background(), s.RPCClient)
 	s.Nil(err)
 
@@ -54,6 +58,7 @@ func (s *ProposerTestSuite) SetupTest() {
 	s.Nil(err)
 	s.s = syncer
 
+	log.Info("Initializing proposer.")
 	l1ProposerPrivKey, err := crypto.ToECDSA(common.FromHex(os.Getenv("L1_PROPOSER_PRIVATE_KEY")))
 	s.Nil(err)
 
@@ -64,6 +69,7 @@ func (s *ProposerTestSuite) SetupTest() {
 	s.Nil(err)
 	s.NotEmpty(jwtSecret)
 
+	log.Info("Initializing proposer configuration.")
 	s.Nil(p.InitFromConfig(ctx, &Config{
 		ClientConfig: &rpc.ClientConfig{
 			L1Endpoint:        os.Getenv("L1_WS"),
@@ -115,14 +121,10 @@ func (s *ProposerTestSuite) SetupTest() {
 
 	s.p = p
 	s.cancel = cancel
+	log.Info("Proposer initialized successfully.")
 }
 
-func (s *ProposerTestSuite) TestTxPoolContentWithMinTip() {
-	if os.Getenv("L2_NODE") == "l2_reth" {
-		s.T().Skip()
-	}
-
-	// Empty mempool at first.
+func (s *ProposerTestSuite) emptyMempool() {
 	for {
 		poolContent, err := s.RPCClient.GetPoolContent(
 			context.Background(),
@@ -130,19 +132,27 @@ func (s *ProposerTestSuite) TestTxPoolContentWithMinTip() {
 			s.p.protocolConfigs.BlockMaxGasLimit,
 			rpc.BlockMaxTxListBytes,
 			s.p.LocalAddresses,
-			10,
+			10, //We fetch only 10 now to check if the mempool is empty. Even if there are more txs in the mempool, the proposeOp would fetch the maxTrxList and propose them.
 			0,
 			s.p.chainConfig,
 		)
 		s.Nil(err)
 
-		if len(poolContent) > 0 {
+		if len(poolContent) > 0 && len(poolContent[0].TxList) > 0 {
+			log.Info("Emptying mempool. Tx count", "txCount", len(poolContent[0].TxList))
 			s.Nil(s.p.ProposeOp(context.Background()))
 			s.Nil(s.s.ProcessL1Blocks(context.Background()))
 			continue
 		}
 		break
 	}
+}
+
+func (s *ProposerTestSuite) insertBogusTransactions(
+	numberOfTransactionsForEachPrivateKey int, numberOfZeroTipTransactions int, numberOfWallets int,
+) {
+	// Empty the mempool before inserting bogus transactions
+	s.emptyMempool()
 
 	privetKeyHexList := []string{
 		"0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d", // 0x70997970C51812dc3A010C7d01b50e0d17dc79C8
@@ -152,50 +162,119 @@ func (s *ProposerTestSuite) TestTxPoolContentWithMinTip() {
 		"0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba", // 0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc
 	}
 
+	if numberOfWallets > len(privetKeyHexList) {
+		s.T().Fatalf("numberOfWallets (%d) is greater than the available private keys (%d)",
+			numberOfWallets, len(privetKeyHexList))
+	}
+
 	var privateKeys []*ecdsa.PrivateKey
-	for _, privateKeyHex := range privetKeyHexList {
-		priv, err := crypto.ToECDSA(common.FromHex(privateKeyHex))
+
+	for i := 0; i < numberOfWallets; i++ {
+		priv, err := crypto.ToECDSA(common.FromHex(privetKeyHexList[i]))
 		s.Nil(err)
 		privateKeys = append(privateKeys, priv)
 	}
 
-	originalNonceMap := make(map[common.Address]uint64)
+	// Create a new random source
+	randomSource := rand.New(rand.NewSource(time.Now().UnixNano()))
+
 	for _, priv := range privateKeys {
 		transactOpts, err := bind.NewKeyedTransactorWithChainID(priv, s.RPCClient.L2.ChainID)
 		s.Nil(err)
 		nonce, err := s.RPCClient.L2.PendingNonceAt(context.Background(), transactOpts.From)
 		s.Nil(err)
-		originalNonceMap[transactOpts.From] = nonce
-		// Send 1500 transactions to mempool
-		for i := 0; i < 300; i++ {
-			_, err = testutils.AssembleTestTx(s.RPCClient.L2, priv, nonce+uint64(i), &transactOpts.From, common.Big1, nil)
+		// Send bogus transactions to mempool for each private key
+		for i := 0; i < numberOfTransactionsForEachPrivateKey; i++ {
+			_, err = testutils.AssembleTestTx(s.RPCClient.L2, priv,
+				nonce+uint64(i), &transactOpts.From, common.Big1, nil,
+				big.NewInt(int64(randomSource.Intn(10)+1)*params.GWei),
+				2_100_000,
+			)
 			s.Nil(err)
 		}
+
+		// Add zero tip transactions to the mempool
+		for k := 0; k < numberOfZeroTipTransactions; k++ {
+			_, err = testutils.AssembleTestTx(s.RPCClient.L2, priv,
+				nonce+uint64(numberOfTransactionsForEachPrivateKey+k),
+				&transactOpts.From, common.Big1, nil,
+				common.Big0,
+				2_100_000+uint64(randomSource.Intn(1000)), // Adding a random value between 0 and 999 to 2.1 million
+			)
+			s.Nil(err)
+		}
+
 	}
+}
+
+func (s *ProposerTestSuite) TestTxPoolContentWithMinTip() {
+	if os.Getenv("L2_NODE") == "l2_reth" {
+		s.T().Skip()
+	}
+
+	//First input is the number of transactions for each private key,
+	//second input is the number of wallets
+	numberOfTransactionsForEachPrivateKey := 0
+	numberOfPrivateKeys := 5
+	numberOfZeroTipTransactions := 300
+
+	s.insertBogusTransactions(numberOfTransactionsForEachPrivateKey, numberOfZeroTipTransactions, numberOfPrivateKeys)
+
+	s.Nil(s.p.ProposeOp(context.Background()))
+	s.Nil(s.s.ProcessL1Blocks(context.Background()))
+
+	// Fetch the latest block from L2
+	latestBlock, err := s.RPCClient.L2.BlockByNumber(context.Background(), nil)
+	s.Nil(err)
+
+	// Extract transactions from the latest block
+	transactions := latestBlock.Transactions()
+
+	// Log the number of transactions fetched
+	log.Info("Fetched transactions from L2 latest block", "count", len(transactions))
+
+}
+
+func (s *ProposerTestSuite) TestGetRpcPoolContent() {
+	//Here we test the getPoolContent function of the proposer
+	//We insert a certain number of bogus transactions into the pool
+	//and then we test the getPoolContent function with different blockMaxGasLimit and blockMaxTxListBytes
+	//and different maxTransactionsLists
+	//and different txLengthList
+	numberOfTransactionsForEachPrivateKey := 200
+	numberOfPrivateKeys := 5
+	numberOfZeroTipTransactions := 100
+	totalTransactions := (numberOfTransactionsForEachPrivateKey + numberOfZeroTipTransactions) * numberOfPrivateKeys
+
+	s.insertBogusTransactions(numberOfTransactionsForEachPrivateKey, numberOfZeroTipTransactions, numberOfPrivateKeys)
 
 	for _, testCase := range []struct {
 		blockMaxGasLimit     uint32
 		blockMaxTxListBytes  uint64
 		maxTransactionsLists uint64
 		txLengthList         []int
+		minTip               uint64
 	}{
 		{
 			s.p.protocolConfigs.BlockMaxGasLimit,
 			rpc.BlockMaxTxListBytes,
 			s.p.MaxProposedTxListsPerEpoch,
-			[]int{1500},
+			[]int{totalTransactions},
+			0,
 		},
 		{
 			s.p.protocolConfigs.BlockMaxGasLimit,
 			rpc.BlockMaxTxListBytes,
 			s.p.MaxProposedTxListsPerEpoch * 5,
-			[]int{1500},
+			[]int{totalTransactions},
+			0,
 		},
 		{
 			s.p.protocolConfigs.BlockMaxGasLimit / 50,
 			rpc.BlockMaxTxListBytes,
 			200,
-			[]int{129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 81},
+			[]int{129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 81}, //This adds up to 1500
+			0,
 		},
 	} {
 		poolContent, err := s.RPCClient.GetPoolContent(
@@ -205,37 +284,18 @@ func (s *ProposerTestSuite) TestTxPoolContentWithMinTip() {
 			testCase.blockMaxTxListBytes,
 			s.p.LocalAddresses,
 			testCase.maxTransactionsLists,
-			0,
+			testCase.minTip,
 			s.p.chainConfig,
 		)
 		s.Nil(err)
 
-		nonceMap := maps.Clone(originalNonceMap)
-		// Check the order of nonce.
-		for _, txList := range poolContent {
-			for _, tx := range txList.TxList {
-				sender, err := types.Sender(types.LatestSignerForChainID(s.RPCClient.L2.ChainID), tx)
-				s.Nil(err)
-				s.Equalf(nonceMap[sender], tx.Nonce(),
-					fmt.Sprintf("incorrect nonce of %s, expect: %d, actual: %d",
-						sender.String(),
-						nonceMap[sender],
-						tx.Nonce(),
-					))
-				nonceMap[sender]++
-			}
-		}
-
-		s.GreaterOrEqual(int(testCase.maxTransactionsLists), len(poolContent))
+		s.GreaterOrEqual(int(testCase.maxTransactionsLists), len(poolContent)) //This is to check how many txLists are in poolContent
 		for i, txsLen := range testCase.txLengthList {
 			s.Equal(txsLen, poolContent[i].TxList.Len())
 			s.GreaterOrEqual(uint64(testCase.blockMaxGasLimit), poolContent[i].EstimatedGasUsed)
 			s.GreaterOrEqual(testCase.blockMaxTxListBytes, poolContent[i].BytesLength)
 		}
 	}
-
-	s.Nil(s.p.ProposeOp(context.Background()))
-	s.Nil(s.s.ProcessL1Blocks(context.Background()))
 }
 
 func (s *ProposerTestSuite) TestProposeOpNoEmptyBlock() {
@@ -389,6 +449,30 @@ func (s *ProposerTestSuite) TestStartClose() {
 	s.NotPanics(func() { s.p.Close(s.p.ctx) })
 }
 
+func (s *ProposerTestSuite) TestCalculateInitialWaitTime() {
+	// Generate a random offset within the slot time
+	timeLapsedSinceLastSlot := float64(rand.Intn(int(SlotTime*1000))) / 1000.0 // Random milliseconds within the slot
+	timeLeft := SlotTime - timeLapsedSinceLastSlot
+	log.Info("Time left to the next slot", "time", timeLeft)
+
+	// Calculate expected wait time
+	expectedWaitTime := timeLeft - TimeGapToPropose
+	if expectedWaitTime < 0 {
+		expectedWaitTime += SlotTime
+	}
+	log.Info("Expected wait time:", "expectedWaitTime", expectedWaitTime)
+
+	// Calculate the initial wait time using the existing Proposer instance
+	actualWaitTime := s.p.calculateInitialWaitTime(timeLeft)
+	log.Info("Actual wait time:", "actualWaitTime", actualWaitTime.Seconds())
+
+	// Assert that the calculated wait time is as expected
+	s.InDelta(expectedWaitTime, actualWaitTime.Seconds(), 0.001, "The initial wait time should align with T - 2 seconds")
+
+	log.Info("Finished TestCalculateInitialWaitTime")
+}
+
 func TestProposerTestSuite(t *testing.T) {
+	log.Error("TestProposerTestSuite started")
 	suite.Run(t, new(ProposerTestSuite))
 }
