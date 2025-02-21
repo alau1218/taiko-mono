@@ -154,7 +154,6 @@ var ProposerFlags = MergeFlags(CommonFlags, []cli.Flag{
 	BlobAllowed,
 	FallbackToCalldata,
 	RevertProtectionEnabled,
-	RedisDBEnabled,
 	RedisAddress,
 	RedisPassword,
 }, TxmgrFlags)
