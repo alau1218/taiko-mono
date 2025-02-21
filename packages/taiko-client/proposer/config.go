@@ -85,12 +85,6 @@ func NewConfigFromCliContext(c *cli.Context) (*Config, error) {
 		return nil, fmt.Errorf("max proposed tx lists per epoch should not exceed 2, got: %d", maxProposedTxListsPerEpoch)
 	}
 
-	redisConfig := &RedisConfig{
-		Address:  c.String(flags.RedisAddress.Name),
-		Password: c.String(flags.RedisPassword.Name),
-		DB:       c.Int(flags.RedisDB.Name),
-	}
-
 	return &Config{
 		ClientConfig: &rpc.ClientConfig{
 			L1Endpoint:        c.String(flags.L1WSEndpoint.Name),
@@ -128,6 +122,5 @@ func NewConfigFromCliContext(c *cli.Context) (*Config, error) {
 			l1ProposerPrivKey,
 			c,
 		),
-		RedisConfig: redisConfig,
 	}, nil
 }
