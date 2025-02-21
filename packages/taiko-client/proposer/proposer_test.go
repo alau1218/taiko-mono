@@ -17,13 +17,15 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/miner"
+
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/stretchr/testify/suite"
 
 	// Alias the standard library math package
 
-	"github.com/taikoxyz/taiko-mono/packages/taiko-client/bindings"
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/bindings/metadata"
+	ontakeBindings "github.com/taikoxyz/taiko-mono/packages/taiko-client/bindings/ontake"
+	pacayaBindings "github.com/taikoxyz/taiko-mono/packages/taiko-client/bindings/pacaya"
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/driver/chain_syncer/beaconsync"
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/driver/chain_syncer/blob"
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/driver/state"
@@ -52,33 +54,37 @@ func (s *ProposerTestSuite) SetupTest() {
 		state2,
 		beaconsync.NewSyncProgressTracker(s.RPCClient.L2, 1*time.Hour),
 		0,
-		nil,
+		s.BlobServer.URL(),
 		nil,
 	)
 	s.Nil(err)
 	s.s = syncer
 
-	log.Info("Initializing proposer.")
-	l1ProposerPrivKey, err := crypto.ToECDSA(common.FromHex(os.Getenv("L1_PROPOSER_PRIVATE_KEY")))
-	s.Nil(err)
-
-	p := new(Proposer)
+	var (
+		l1ProposerPrivKey = s.KeyFromEnv("L1_PROPOSER_PRIVATE_KEY")
+		p                 = new(Proposer)
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	jwtSecret, err := jwt.ParseSecretFromFile(os.Getenv("JWT_SECRET"))
 	s.Nil(err)
 	s.NotEmpty(jwtSecret)
 
+	log.Info("Proposer address", "address", crypto.PubkeyToAddress(l1ProposerPrivKey.PublicKey).String())
+
 	log.Info("Initializing proposer configuration.")
 	s.Nil(p.InitFromConfig(ctx, &Config{
 		ClientConfig: &rpc.ClientConfig{
-			L1Endpoint:        os.Getenv("L1_WS"),
-			L2Endpoint:        os.Getenv("L2_HTTP"),
-			L2EngineEndpoint:  os.Getenv("L2_AUTH"),
-			JwtSecret:         string(jwtSecret),
-			TaikoL1Address:    common.HexToAddress(os.Getenv("TAIKO_L1")),
-			TaikoL2Address:    common.HexToAddress(os.Getenv("TAIKO_L2")),
-			TaikoTokenAddress: common.HexToAddress(os.Getenv("TAIKO_TOKEN")),
+			L1Endpoint:                  os.Getenv("L1_WS"),
+			L2Endpoint:                  os.Getenv("L2_HTTP"),
+			L2EngineEndpoint:            os.Getenv("L2_AUTH"),
+			JwtSecret:                   string(jwtSecret),
+			TaikoL1Address:              common.HexToAddress(os.Getenv("TAIKO_INBOX")),
+			ProverSetAddress:            common.HexToAddress(os.Getenv("PROVER_SET")),
+			TaikoWrapperAddress:         common.HexToAddress(os.Getenv("TAIKO_WRAPPER")),
+			ForcedInclusionStoreAddress: common.HexToAddress(os.Getenv("FORCED_INCLUSION_STORE")),
+			TaikoL2Address:              common.HexToAddress(os.Getenv("TAIKO_ANCHOR")),
+			TaikoTokenAddress:           common.HexToAddress(os.Getenv("TAIKO_TOKEN")),
 		},
 		L1ProposerPrivKey:          l1ProposerPrivKey,
 		L2SuggestedFeeRecipient:    common.HexToAddress(os.Getenv("L2_SUGGESTED_FEE_RECIPIENT")),
@@ -86,6 +92,7 @@ func (s *ProposerTestSuite) SetupTest() {
 		ProposeInterval:            1024 * time.Hour,
 		MaxProposedTxListsPerEpoch: 1,
 		ProposeBlockTxGasLimit:     10_000_000,
+		BlobAllowed:                true,
 		FallbackToCalldata:         true,
 		TxmgrConfigs: &txmgr.CLIConfig{
 			L1RPCURL:                  os.Getenv("L1_WS"),
@@ -120,6 +127,7 @@ func (s *ProposerTestSuite) SetupTest() {
 	}, nil, nil))
 
 	s.p = p
+	s.p.RegisterTxMgrSelctorToBlobServer(s.BlobServer)
 	s.cancel = cancel
 	log.Info("Proposer initialized successfully.")
 }
@@ -129,12 +137,13 @@ func (s *ProposerTestSuite) emptyMempool() {
 		poolContent, err := s.RPCClient.GetPoolContent(
 			context.Background(),
 			s.p.proposerAddress,
-			s.p.protocolConfigs.BlockMaxGasLimit,
+			s.p.protocolConfigs.BlockMaxGasLimit(),
 			rpc.BlockMaxTxListBytes,
 			s.p.LocalAddresses,
 			10, //We fetch only 10 now to check if the mempool is empty. Even if there are more txs in the mempool, the proposeOp would fetch the maxTrxList and propose them.
 			0,
 			s.p.chainConfig,
+			s.p.protocolConfigs.BaseFeeConfig(),
 		)
 		s.Nil(err)
 
@@ -256,21 +265,21 @@ func (s *ProposerTestSuite) TestGetRpcPoolContent() {
 		minTip               uint64
 	}{
 		{
-			s.p.protocolConfigs.BlockMaxGasLimit,
+			s.p.protocolConfigs.BlockMaxGasLimit(),
 			rpc.BlockMaxTxListBytes,
 			s.p.MaxProposedTxListsPerEpoch,
 			[]int{totalTransactions},
 			0,
 		},
 		{
-			s.p.protocolConfigs.BlockMaxGasLimit,
+			s.p.protocolConfigs.BlockMaxGasLimit(),
 			rpc.BlockMaxTxListBytes,
 			s.p.MaxProposedTxListsPerEpoch * 5,
 			[]int{totalTransactions},
 			0,
 		},
 		{
-			s.p.protocolConfigs.BlockMaxGasLimit / 50,
+			s.p.protocolConfigs.BlockMaxGasLimit() / 50,
 			rpc.BlockMaxTxListBytes,
 			200,
 			[]int{129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 81}, //This adds up to 1500
@@ -286,6 +295,7 @@ func (s *ProposerTestSuite) TestGetRpcPoolContent() {
 			testCase.maxTransactionsLists,
 			testCase.minTip,
 			s.p.chainConfig,
+			s.p.protocolConfigs.BaseFeeConfig(),
 		)
 		s.Nil(err)
 
@@ -299,10 +309,6 @@ func (s *ProposerTestSuite) TestGetRpcPoolContent() {
 }
 
 func (s *ProposerTestSuite) TestProposeOpNoEmptyBlock() {
-	// TODO: Temporarily skip this test case when using l2_reth node.
-	if os.Getenv("L2_NODE") == "l2_reth" {
-		s.T().Skip()
-	}
 	defer s.Nil(s.s.ProcessL1Blocks(context.Background()))
 
 	p := s.p
@@ -321,12 +327,13 @@ func (s *ProposerTestSuite) TestProposeOpNoEmptyBlock() {
 		preBuiltTxList, err = s.RPCClient.GetPoolContent(
 			context.Background(),
 			p.proposerAddress,
-			p.protocolConfigs.BlockMaxGasLimit,
+			p.protocolConfigs.BlockMaxGasLimit(),
 			rpc.BlockMaxTxListBytes,
 			p.LocalAddresses,
 			p.MaxProposedTxListsPerEpoch,
 			0,
 			p.chainConfig,
+			p.protocolConfigs.BaseFeeConfig(),
 		)
 		time.Sleep(time.Second)
 	}
@@ -365,12 +372,18 @@ func (s *ProposerTestSuite) TestName() {
 
 func (s *ProposerTestSuite) TestProposeOp() {
 	// Propose txs in L2 execution engine's mempool
-	sink := make(chan *bindings.TaikoL1ClientBlockProposedV2)
-	sub, err := s.p.rpc.TaikoL1.WatchBlockProposedV2(nil, sink, nil)
+	sink1 := make(chan *pacayaBindings.TaikoInboxClientBatchProposed)
+	sink2 := make(chan *ontakeBindings.TaikoL1ClientBlockProposedV2)
+	sub1, err := s.RPCClient.PacayaClients.TaikoInbox.WatchBatchProposed(nil, sink1)
 	s.Nil(err)
+	sub2, err := s.RPCClient.OntakeClients.TaikoL1.WatchBlockProposedV2(nil, sink2, nil)
+	s.Nil(err)
+
 	defer func() {
-		sub.Unsubscribe()
-		close(sink)
+		sub1.Unsubscribe()
+		sub2.Unsubscribe()
+		close(sink1)
+		close(sink2)
 	}()
 
 	to := common.BytesToAddress(testutils.RandomBytes(32))
@@ -379,10 +392,13 @@ func (s *ProposerTestSuite) TestProposeOp() {
 
 	s.Nil(s.p.ProposeOp(context.Background()))
 
-	var (
-		event = <-sink
-		meta  = metadata.NewTaikoDataBlockMetadataOntake(event)
-	)
+	var meta metadata.TaikoProposalMetaData
+	select {
+	case event := <-sink1:
+		meta = metadata.NewTaikoDataBlockMetadataPacaya(event)
+	case event := <-sink2:
+		meta = metadata.NewTaikoDataBlockMetadataOntake(event)
+	}
 	s.Equal(meta.GetCoinbase(), s.p.L2SuggestedFeeRecipient)
 
 	_, isPending, err := s.p.rpc.L1.TransactionByHash(context.Background(), meta.GetTxHash())
@@ -400,47 +416,60 @@ func (s *ProposerTestSuite) TestProposeEmptyBlockOp() {
 	s.Nil(s.p.ProposeOp(context.Background()))
 }
 
-func (s *ProposerTestSuite) TestProposeTxListOntake() {
-	for i := 0; i < int(s.p.protocolConfigs.OntakeForkHeight); i++ {
-		s.ProposeAndInsertValidBlock(s.p, s.s)
-	}
-
-	l2Head, err := s.p.rpc.L2.HeaderByNumber(context.Background(), nil)
-	s.Nil(err)
-	s.GreaterOrEqual(l2Head.Number.Uint64(), s.p.protocolConfigs.OntakeForkHeight)
-
-	sink := make(chan *bindings.TaikoL1ClientBlockProposedV2)
-	sub, err := s.p.rpc.TaikoL1.WatchBlockProposedV2(nil, sink, nil)
-	s.Nil(err)
-	defer func() {
-		sub.Unsubscribe()
-		close(sink)
-	}()
-	s.Nil(s.p.ProposeTxListOntake(context.Background(), []types.Transactions{{}, {}}))
-	s.Nil(s.s.ProcessL1Blocks(context.Background()))
-
-	var l1Height *big.Int
-	for i := 0; i < 2; i++ {
-		event := <-sink
-		if l1Height == nil {
-			l1Height = new(big.Int).SetUint64(event.Raw.BlockNumber)
-			continue
-		}
-		s.Equal(l1Height.Uint64(), event.Raw.BlockNumber)
-	}
-
-	newL2head, err := s.p.rpc.L2.HeaderByNumber(context.Background(), nil)
-	s.Nil(err)
-
-	s.Equal(l2Head.Number.Uint64()+2, newL2head.Number.Uint64())
-}
-
 func (s *ProposerTestSuite) TestUpdateProposingTicker() {
 	s.p.ProposeInterval = 1 * time.Hour
 	s.NotPanics(s.p.updateProposingTicker)
 
 	s.p.ProposeInterval = 0
 	s.NotPanics(s.p.updateProposingTicker)
+}
+
+func (s *ProposerTestSuite) TestProposeMultiBlobsInOneBatch() {
+	// Propose valid L2 blocks to make the L2 fork into Pacaya fork.
+	s.ForkIntoPacaya(s.p, s.s)
+
+	l2Head1, err := s.RPCClient.L2.HeaderByNumber(context.Background(), nil)
+	s.Nil(err)
+	s.NotZero(l2Head1.Number.Uint64())
+
+	// Propose a batch which contains two blobs.
+	var (
+		batchSize    = 2
+		txNumInBatch = 500
+		txsBatch     = make([]types.Transactions, batchSize)
+	)
+	testAddrNonce, err := s.RPCClient.L2.NonceAt(context.Background(), s.TestAddr, l2Head1.Number)
+	s.Nil(err)
+
+	for i := 0; i < batchSize; i++ {
+		for j := 0; j < txNumInBatch; j++ {
+			to := common.BytesToAddress(testutils.RandomBytes(32))
+
+			tx, err := testutils.AssembleTestTx(
+				s.RPCClient.L2,
+				s.TestAddrPrivKey,
+				uint64(i*txNumInBatch+int(testAddrNonce)+j),
+				&to,
+				common.Big1,
+				[]byte{1},
+			)
+			s.Nil(err)
+			txsBatch[i] = append(txsBatch[i], tx)
+		}
+	}
+
+	s.Nil(s.p.ProposeTxListPacaya(context.Background(), txsBatch))
+	s.Nil(s.s.ProcessL1Blocks(context.Background()))
+
+	l2Head2, err := s.RPCClient.L2.BlockByNumber(context.Background(), nil)
+	s.Nil(err)
+	s.Equal(l2Head1.Number.Uint64()+uint64(batchSize), l2Head2.Number().Uint64())
+	s.Equal(txNumInBatch+1, l2Head2.Transactions().Len())
+
+	l2Head3, err := s.RPCClient.L2.BlockByHash(context.Background(), l2Head2.ParentHash())
+	s.Nil(err)
+	s.Equal(l2Head1.Number.Uint64()+uint64(batchSize-1), l2Head3.Number().Uint64())
+	s.Equal(txNumInBatch+1, l2Head3.Transactions().Len())
 }
 
 func (s *ProposerTestSuite) TestStartClose() {
