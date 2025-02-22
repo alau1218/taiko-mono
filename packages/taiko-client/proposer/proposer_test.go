@@ -24,6 +24,7 @@ import (
 
 	// Alias the standard library math package
 
+	"github.com/redis/go-redis/v9"
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/bindings"
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/bindings/metadata"
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/driver/chain_syncer/beaconsync"
@@ -122,7 +123,6 @@ func (s *ProposerTestSuite) SetupTest() {
 			TxSendTimeout:             txmgr.DefaultBatcherFlagValues.TxSendTimeout,
 			TxNotInMempoolTimeout:     txmgr.DefaultBatcherFlagValues.TxNotInMempoolTimeout,
 		},
-		RedisEnabled: true,
 		RedisConfig: &RedisConfig{
 			Address:  "localhost:6379",
 			Password: "",
@@ -131,6 +131,16 @@ func (s *ProposerTestSuite) SetupTest() {
 
 	s.p = p
 	log.Info("Proposer initialized successfully.")
+
+	// Initialize Redis client for testing purposes
+	s.p.redisClient = redis.NewClient(&redis.Options{
+		Addr:     "localhost:6379", // Use a test Redis server
+		Password: "",               // No password set
+		DB:       1,                // Use a different DB for tests
+	})
+	// Flush the test DB before starting
+	err = s.p.redisClient.FlushDB(ctx).Err()
+	s.Nil(err)
 }
 
 func (s *ProposerTestSuite) emptyMempool() {
@@ -141,7 +151,7 @@ func (s *ProposerTestSuite) emptyMempool() {
 			s.p.protocolConfigs.BlockMaxGasLimit,
 			rpc.BlockMaxTxListBytes,
 			s.p.LocalAddresses,
-			10, //We fetch only 10 now to check if the mempool is empty. Even if there are more txs in the mempool, the proposeOp would fetch the maxTrxList and propose them.
+			10,
 			0,
 			s.p.chainConfig,
 		)
@@ -516,6 +526,15 @@ func (s *ProposerTestSuite) TestProposerStartAndPropose() {
 		proposalTimes[1].Sub(proposalTimes[0]),
 		time.Duration(SlotTime*float64(time.Second))+100*time.Millisecond,
 		"The two proposal should be divided by SlotTime")
+}
+
+func (s *ProposerTestSuite) TearDownTest() {
+	s.cancel()
+	s.p.Close(context.Background())
+
+	// Flush the test Redis DB after tests
+	err := s.p.redisClient.FlushDB(context.Background()).Err()
+	assert.Nil(s.T(), err, "Failed to flush Redis DB after tests")
 }
 
 func TestProposerTestSuite(t *testing.T) {

@@ -142,19 +142,12 @@ func (p *Proposer) InitFromConfig(
 		cfg.FallbackToCalldata,
 	)
 
-	if cfg.RedisEnabled {
-
-		p.redisClient = redis.NewClient(&redis.Options{
-			Addr:     cfg.RedisConfig.Address,
-			Password: cfg.RedisConfig.Password,
-			DB:       0, //Default DB
-		})
-		log.Info("Redis instantiated successfully", "address", cfg.RedisConfig.Address)
-	} else {
-		log.Info("Redis Info",
-			"RedisEnabled", cfg.RedisEnabled)
-	}
-
+	p.redisClient = redis.NewClient(&redis.Options{
+		Addr:     cfg.RedisConfig.Address,
+		Password: cfg.RedisConfig.Password,
+		DB:       0, //Default DB
+	})
+	log.Info("Redis instantiated successfully", "address", cfg.RedisConfig.Address)
 	return nil
 }
 
@@ -162,6 +155,13 @@ func (p *Proposer) InitFromConfig(
 func (p *Proposer) Start() error {
 	p.wg.Add(1)
 	go func() {
+		l1BlockNumber, err := p.rpc.L1.BlockNumber(p.ctx)
+		if err != nil {
+			log.Error("Failed to fetch L1 block number", "error", err)
+			return
+		}
+		p.recordL1BlockNumber(l1BlockNumber)
+
 		// Start the event loop
 		p.eventLoop()
 	}()
@@ -186,6 +186,25 @@ func (p *Proposer) eventLoop() {
 		case <-p.proposingTimer.C:
 			metrics.ProposerProposeEpochCounter.Add(1)
 			p.totalEpochs++
+
+			//Before proposing, we check if the L1 block number is the same as the last proposed block number
+			//If it is, we skip the proposal
+			//If it is not, we propose the transactions
+			l1BlockNumber, err := p.rpc.L1.BlockNumber(p.ctx)
+			if err != nil {
+				log.Error("Failed to fetch L1 block number", "error", err)
+				return
+			}
+			redisL1BlockNumber, redisErr := p.redisClient.Get(p.ctx, "l1_block_number").Int64()
+			if redisErr != nil {
+				log.Error("Failed to get L1 block number from Redis", "error", redisErr)
+				return
+			}
+
+			if l1BlockNumber == uint64(redisL1BlockNumber) {
+				log.Info("L1 block number is the same as the last proposed block number, skipping proposal")
+				return
+			}
 
 			// Attempt a proposing operation
 			if err := p.ProposeOp(p.ctx); err != nil {
@@ -259,6 +278,18 @@ func (p *Proposer) fetchPoolContent(filterPoolContent bool) ([]types.Transaction
 			var currentBlobSize uint64
 
 			for _, tx := range txs.TxList {
+				hasProposed, err := p.hasBeenProposed(tx.Hash())
+				if err != nil {
+					log.Error("Error checking if transaction has been proposed", "txHash", tx.Hash().Hex(), "error", err)
+					continue
+				}
+				if hasProposed {
+					log.Info(
+						"Not including previously proposed transaction since blob space is limited",
+						"txHash", tx.Hash().Hex())
+					continue
+				}
+
 				txSize := uint64(len(tx.Data()))
 				if currentBlobSize+txSize > MaxBlobSpaceSize {
 					break
@@ -350,6 +381,28 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		return err
 	}
 
+	// Filter out transactions that have been proposed within the last 24 hours.
+	var filteredTxLists []types.Transactions
+	for _, txs := range txLists {
+		var filteredTxs types.Transactions
+		for _, tx := range txs {
+			hasProposed, err := p.hasBeenProposed(tx.Hash())
+			if err != nil {
+				log.Error("Error checking if transaction has been proposed", "txHash", tx.Hash().Hex(), "error", err)
+				continue
+			}
+			if hasProposed {
+				log.Info("Skipping previously proposed transaction", "txHash", tx.Hash().Hex())
+				continue
+			}
+			filteredTxs = append(filteredTxs, tx)
+		}
+		if filteredTxs.Len() > 0 {
+			filteredTxLists = append(filteredTxLists, filteredTxs)
+		}
+	}
+	txLists = filteredTxLists
+
 	// If the pool content is empty, return.
 	if len(txLists) == 0 {
 		return nil
@@ -412,13 +465,32 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		metrics.ProposerProposeTxListsDuration.Set(proposeDuration.Seconds())
 		log.Info("ProposeTxLists duration", "duration", proposeDuration)
 
-		return err
+		// Mark all proposed transactions
+		for _, txs := range txLists {
+			for _, tx := range txs {
+				err := p.markAsProposed(tx.Hash())
+				if err != nil {
+					log.Warn("Failed to mark transaction as proposed", "txHash", tx.Hash().Hex(), "error", err)
+					return err
+				}
+			}
+		}
+
+		//Update the L1 block number in Redis
+		l1BlockNumber, err := p.rpc.L1.BlockNumber(p.ctx)
+		if err != nil {
+			log.Error("Failed to fetch L1 block number", "error", err)
+			return nil
+		}
+
+		p.recordL1BlockNumber(l1BlockNumber)
 	} else {
 		log.Info("L1 cost is greater than total earnings, skipping proposal",
 			"Deficit",
 			utils.WeiToEther(l1Cost.Sub(l1Cost, totalEarnings)))
 		return nil
 	}
+	return nil
 }
 
 // ProposeTxList proposes the given transactions lists to TaikoL1 smart contract.
@@ -571,4 +643,30 @@ func (p *Proposer) calculateInitialWaitTime(timeLeftInSlot float64) time.Duratio
 	}
 
 	return time.Duration(waitTime * float64(time.Second))
+}
+
+// hasBeenProposed checks if the transaction hash exists in Redis.
+func (p *Proposer) hasBeenProposed(txHash common.Hash) (bool, error) {
+	exists, err := p.redisClient.Exists(p.ctx, txHash.Hex()).Result()
+	if err != nil {
+		return false, err
+	}
+	return exists == 1, nil
+}
+
+// markAsProposed stores the transaction hash in Redis with a 24-hour expiration.
+func (p *Proposer) markAsProposed(txHash common.Hash) error {
+	err := p.redisClient.Set(p.ctx, txHash.Hex(), 1, 24*time.Hour).Err()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *Proposer) recordL1BlockNumber(l1BlockNumber uint64) {
+	err := p.redisClient.Set(p.ctx, "l1_block_number", l1BlockNumber, 24*time.Hour).Err()
+	if err != nil {
+		log.Error("Failed to record L1 block number in Redis", "error", err)
+		return
+	}
 }

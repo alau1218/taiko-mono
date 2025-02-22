@@ -20,6 +20,14 @@ var (
 		Category: proposerCategory,
 		EnvVars:  []string{"L2_SUGGESTED_FEE_RECIPIENT"},
 	}
+	RedisAddress = &cli.StringFlag{
+		Name:     "redis.address",
+		Usage:    "Address of the Redis server",
+		Value:    "localhost:6379",
+		Required: true,
+		Category: proposerCategory,
+		EnvVars:  []string{"REDIS_ADDRESS"},
+	}
 )
 
 // Optional flags used by proposer.
@@ -111,20 +119,6 @@ var (
 		EnvVars:  []string{"L1_REVERT_PROTECTION"},
 	}
 	// Redis related.
-	RedisDBEndabled = &cli.BoolFlag{
-		Name:     "redis.enabled",
-		Usage:    "If set to true, proposer will use Redis to store the transaction pool and related data",
-		Value:    false,
-		Category: proposerCategory,
-		EnvVars:  []string{"REDIS_ENABLED"},
-	}
-	RedisAddress = &cli.StringFlag{
-		Name:     "redis.address",
-		Usage:    "Address of the Redis server",
-		Value:    "localhost:6379",
-		Category: proposerCategory,
-		EnvVars:  []string{"REDIS_ADDRESS"},
-	}
 	RedisPassword = &cli.StringFlag{
 		Name:     "redis.password",
 		Usage:    "Password for Redis authentication",
@@ -154,7 +148,6 @@ var ProposerFlags = MergeFlags(CommonFlags, []cli.Flag{
 	BlobAllowed,
 	FallbackToCalldata,
 	RevertProtectionEnabled,
-	RedisDBEndabled,
 	RedisAddress,
 	RedisPassword,
 }, TxmgrFlags)

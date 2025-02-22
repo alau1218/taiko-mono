@@ -127,7 +127,6 @@ func NewConfigFromCliContext(c *cli.Context) (*Config, error) {
 			l1ProposerPrivKey,
 			c,
 		),
-		RedisEnabled: c.Bool(flags.RedisDBEndabled.Name),
-		RedisConfig:  redisConfig,
+		RedisConfig: redisConfig,
 	}, nil
 }
