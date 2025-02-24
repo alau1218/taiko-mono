@@ -2,6 +2,7 @@ package proposer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -682,20 +683,24 @@ func (p *Proposer) saveProposalData(
 	// Create a proposal data structure
 	proposalData := map[string]interface{}{
 		"l1_block_number":     l1BlockNumber,
-		"l2_block_number":     l2BlockNumber,
 		"l1_cost":             l1Cost.String(),
 		"total_earnings":      totalEarnings.String(),
 		"last_proposed_at":    p.lastProposedAt.Format(time.RFC3339), // Store as ISO 8601 string
 		"total_number_of_txs": totalNumberOfTxs,
 	}
 
-	// Save each piece of data to Redis
-	for key, value := range proposalData {
-		err := p.redisClient.Set(p.ctx, key, value, 24*time.Hour).Err()
-		if err != nil {
-			log.Error("Failed to save proposal data in Redis", "key", key, "error", err)
-			return err
-		}
+	// Marshal the proposal data to JSON
+	proposalDataJSON, err := json.Marshal(proposalData)
+	if err != nil {
+		log.Error("Failed to marshal proposal data to JSON", "error", err)
+		return err
+	}
+
+	// Save the proposal data in the format [l2_block_number] : [all the remaining data]
+	err = p.redisClient.Set(p.ctx, fmt.Sprintf("%d", l2BlockNumber), proposalDataJSON, 24*time.Hour).Err()
+	if err != nil {
+		log.Error("Failed to save proposal data in Redis", "l2_block_number", l2BlockNumber, "error", err)
+		return err
 	}
 	return nil
 }

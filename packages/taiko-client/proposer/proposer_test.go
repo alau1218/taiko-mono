@@ -3,6 +3,8 @@ package proposer
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/json"
+	"fmt"
 	"math/big"
 	"math/rand"
 	"os"
@@ -591,36 +593,31 @@ func (s *ProposerTestSuite) TestSaveProposalData() {
 
 	s.Nil(err, "ProposeOp should succeed")
 
+	// Retrieve the L2 block number
+	l2BlockNumber, err := s.p.rpc.L2.BlockNumber(context.Background())
+	s.Nil(err, "Failed to get L2 block number")
+
 	// Retrieve the proposal data from Redis
-	l1BlockNumber, err := s.p.redisClient.Get(context.Background(), "l1_block_number").Result()
-	log.Info("l1BlockNumber", "l1BlockNumber", l1BlockNumber)
-	s.Nil(err, "Failed to get l1_block_number from Redis")
+	proposalDataJSON, err := s.p.redisClient.Get(context.Background(),
+		fmt.Sprintf("%d", l2BlockNumber)).Result()
+	s.Nil(err, "Failed to get proposal data from Redis")
 
-	l2BlockNumberStr, err := s.p.redisClient.Get(context.Background(), "l2_block_number").Result()
-	log.Info("l2BlockNumberStr", "l2BlockNumberStr", l2BlockNumberStr)
-	s.Nil(err, "Failed to get l2_block_number from Redis")
+	var proposalMap map[string]interface{}
+	if err := json.Unmarshal([]byte(proposalDataJSON), &proposalMap); err != nil {
+		log.Error("Failed to unmarshal proposal data", "error", err)
+	}
 
-	l1CostStr, err := s.p.redisClient.Get(context.Background(), "l1_cost").Result()
-	log.Info("l1CostStr", "l1CostStr", l1CostStr)
-	s.Nil(err, "Failed to get l1_cost from Redis")
-
-	totalEarningsStr, err := s.p.redisClient.Get(context.Background(), "total_earnings").Result()
-	log.Info("totalEarningsStr", "totalEarningsStr", totalEarningsStr)
-	s.Nil(err, "Failed to get total_earnings from Redis")
-
-	lastProposedAtStr, err := s.p.redisClient.Get(context.Background(), "last_proposed_at").Result()
-	log.Info("lastProposedAtStr", "lastProposedAtStr", lastProposedAtStr)
-	s.Nil(err, "Failed to get last_proposed_at from Redis")
-
-	totalNumberOfTxsStr, err := s.p.redisClient.Get(context.Background(), "total_number_of_txs").Result()
-	log.Info("totalNumberOfTxsStr", "totalNumberOfTxsStr", totalNumberOfTxsStr)
-	s.Nil(err, "Failed to get total_number_of_txs from Redis")
-
-	// Assert that the retrieved values are not empty
-	s.NotEmpty(l1BlockNumber, "l1_block_number should not be empty")
+	// Validate the contents of the proposal data
+	l1CostStr := proposalMap["l1_cost"].(string)
 	s.NotEmpty(l1CostStr, "l1_cost should not be empty")
+
+	totalEarningsStr := proposalMap["total_earnings"].(string)
 	s.NotEmpty(totalEarningsStr, "total_earnings should not be empty")
+
+	lastProposedAtStr := proposalMap["last_proposed_at"].(string)
 	s.NotEmpty(lastProposedAtStr, "last_proposed_at should not be empty")
+
+	totalNumberOfTxsStr := fmt.Sprintf("%v", proposalMap["total_number_of_txs"])
 	s.NotEmpty(totalNumberOfTxsStr, "total_number_of_txs should not be empty")
 }
 
