@@ -155,13 +155,6 @@ func (p *Proposer) InitFromConfig(
 func (p *Proposer) Start() error {
 	p.wg.Add(1)
 	go func() {
-		l1BlockNumber, err := p.rpc.L1.BlockNumber(p.ctx)
-		if err != nil {
-			log.Error("Failed to fetch L1 block number", "error", err)
-			return
-		}
-		p.recordL1BlockNumber(l1BlockNumber)
-
 		// Start the event loop
 		p.eventLoop()
 	}()
@@ -187,6 +180,7 @@ func (p *Proposer) eventLoop() {
 			metrics.ProposerProposeEpochCounter.Add(1)
 			p.totalEpochs++
 
+			//Update the L1 block number in Redis
 			//Before proposing, we check if the L1 block number is the same as the last proposed block number
 			//If it is, we skip the proposal
 			//If it is not, we propose the transactions
@@ -195,22 +189,14 @@ func (p *Proposer) eventLoop() {
 				log.Error("Failed to fetch L1 block number", "error", err)
 				return
 			}
-			redisL1BlockNumber, redisErr := p.redisClient.Get(p.ctx, "l1_block_number").Int64()
-			if redisErr != nil {
-				log.Error("Failed to get L1 block number from Redis", "error", redisErr)
-				return
-			}
 
-			if l1BlockNumber == uint64(redisL1BlockNumber) {
-				log.Info("L1 block number is the same as the last proposed block number, skipping proposal")
-				return
-			}
-
+			p.recordL1BlockNumber(l1BlockNumber)
 			// Attempt a proposing operation
 			if err := p.ProposeOp(p.ctx); err != nil {
 				log.Error("Proposing operation error", "error", err)
 				continue
 			}
+
 		}
 	}
 }
@@ -403,10 +389,8 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 	}
 	txLists = filteredTxLists
 
-	// If the pool content is empty, return.
-	if len(txLists) == 0 {
-		return nil
-	}
+	//Update the lastProposedAt to the current time before getting to the last part
+	p.lastProposedAt = time.Now()
 
 	// Retrieve the L2 base fee
 	baseFee, err := p.rpc.GetL2BaseFee(ctx, p.chainConfig)
@@ -416,15 +400,16 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 	}
 
 	totalEarnings := new(big.Int).SetUint64(0)
+	totalNumberOfTxs := 0
 	for _, txs := range txLists {
 		for _, tx := range txs {
-
 			if tx.Gas() < 30000 {
 				discountedGas := tx.Gas() * 60 / 100 // Apply 40% discount
 				totalEarnings.Add(totalEarnings, new(big.Int).SetUint64(((baseFee.Uint64()*BaseFeePctToProposer)/100+tx.GasTipCap().Uint64())*discountedGas))
 			} else {
 				totalEarnings.Add(totalEarnings, new(big.Int).SetUint64(((baseFee.Uint64()*BaseFeePctToProposer)/100+tx.GasTipCap().Uint64())*tx.Gas()))
 			}
+			totalNumberOfTxs++
 		}
 		if err != nil {
 			log.Error("Failed to get current base fee", "error", err)
@@ -451,8 +436,24 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		utils.WeiToEther(l1Cost),
 	)
 
-	//Update the lastProposedAt to the current time before getting to the last part
-	p.lastProposedAt = time.Now()
+	// Save proposal data to Redis
+	l2blockNumber, err := p.rpc.L2.BlockNumber(context.Background())
+	if err != nil {
+		log.Error("Failed to get L2 block number", "error", err)
+		l2blockNumber = 0
+	}
+
+	err = p.saveProposalData(
+		p.getL1BlockNumber(),
+		l2blockNumber,
+		l1Cost,
+		totalEarnings,
+		totalNumberOfTxs,
+	)
+	if err != nil {
+		log.Error("Failed to save proposal data in Redis", "error", err)
+		return err
+	}
 
 	if totalEarnings.Cmp(l1Cost) > 0 {
 		log.Info("Expected profit, proposing transactions",
@@ -476,14 +477,6 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 			}
 		}
 
-		//Update the L1 block number in Redis
-		l1BlockNumber, err := p.rpc.L1.BlockNumber(p.ctx)
-		if err != nil {
-			log.Error("Failed to fetch L1 block number", "error", err)
-			return nil
-		}
-
-		p.recordL1BlockNumber(l1BlockNumber)
 	} else {
 		log.Info("L1 cost is greater than total earnings, skipping proposal",
 			"Deficit",
@@ -669,4 +662,40 @@ func (p *Proposer) recordL1BlockNumber(l1BlockNumber uint64) {
 		log.Error("Failed to record L1 block number in Redis", "error", err)
 		return
 	}
+}
+
+func (p *Proposer) getL1BlockNumber() string {
+	l1BlockNumber, err := p.redisClient.Get(p.ctx, "l1_block_number").Result()
+	if err != nil {
+		return "0"
+	}
+	return l1BlockNumber
+}
+
+// saveProposalData saves the relevant proposal data to Redis.
+func (p *Proposer) saveProposalData(
+	l1BlockNumber string,
+	l2BlockNumber uint64,
+	l1Cost *big.Int,
+	totalEarnings *big.Int,
+	totalNumberOfTxs int) error {
+	// Create a proposal data structure
+	proposalData := map[string]interface{}{
+		"l1_block_number":     l1BlockNumber,
+		"l2_block_number":     l2BlockNumber,
+		"l1_cost":             l1Cost.String(),
+		"total_earnings":      totalEarnings.String(),
+		"last_proposed_at":    p.lastProposedAt.Format(time.RFC3339), // Store as ISO 8601 string
+		"total_number_of_txs": totalNumberOfTxs,
+	}
+
+	// Save each piece of data to Redis
+	for key, value := range proposalData {
+		err := p.redisClient.Set(p.ctx, key, value, 24*time.Hour).Err()
+		if err != nil {
+			log.Error("Failed to save proposal data in Redis", "key", key, "error", err)
+			return err
+		}
+	}
+	return nil
 }

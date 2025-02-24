@@ -89,7 +89,6 @@ func (s *ProposerTestSuite) SetupTest() {
 		L1ProposerPrivKey:          l1ProposerPrivKey,
 		L2SuggestedFeeRecipient:    common.HexToAddress(os.Getenv("L2_SUGGESTED_FEE_RECIPIENT")),
 		MinProposingInternal:       0,
-		ProposeInterval:            1024 * time.Hour,
 		MaxProposedTxListsPerEpoch: 1,
 		ProposeBlockTxGasLimit:     10_000_000,
 		FallbackToCalldata:         true,
@@ -168,7 +167,9 @@ func (s *ProposerTestSuite) emptyMempool() {
 }
 
 func (s *ProposerTestSuite) insertBogusTransactions(
-	numberOfTransactionsForEachPrivateKey int, numberOfZeroTipTransactions int, numberOfWallets int,
+	numberOfTransactionsForEachPrivateKey int,
+	numberOfZeroTipTransactions int,
+	numberOfWallets int,
 ) {
 	// Empty the mempool before inserting bogus transactions
 	s.emptyMempool()
@@ -362,7 +363,6 @@ func (s *ProposerTestSuite) TestProposeOpNoEmptyBlock() {
 	p.LocalAddressesOnly = false
 	p.MinGasUsed = blockMinGasLimit
 	p.MinTxListBytes = blockMinTxListBytes
-	p.ProposeInterval = time.Second
 	p.MinProposingInternal = time.Minute
 	s.Nil(p.ProposeOp(context.Background()))
 }
@@ -443,14 +443,6 @@ func (s *ProposerTestSuite) TestProposeTxListOntake() {
 	s.Equal(l2Head.Number.Uint64()+2, newL2head.Number.Uint64())
 }
 
-func (s *ProposerTestSuite) TestUpdateProposingTicker() {
-	s.p.ProposeInterval = 1 * time.Hour
-	s.NotPanics(s.p.updateProposingTicker)
-
-	s.p.ProposeInterval = 0
-	s.NotPanics(s.p.updateProposingTicker)
-}
-
 func (s *ProposerTestSuite) TestCalculateInitialWaitTime() {
 	// Generate a random offset within the slot time
 	timeLapsedSinceLastSlot := float64(rand.Intn(int(SlotTime*1000))) / 1000.0 // Random milliseconds within the slot
@@ -526,6 +518,110 @@ func (s *ProposerTestSuite) TestProposerStartAndPropose() {
 		proposalTimes[1].Sub(proposalTimes[0]),
 		time.Duration(SlotTime*float64(time.Second))+100*time.Millisecond,
 		"The two proposal should be divided by SlotTime")
+}
+
+func (s *ProposerTestSuite) TestProposeOpDoesNotReproposeTxs() {
+	// Insert a single bogus transaction
+	numberOfTransactionsForEachPrivateKey := 1
+	numberOfPrivateKeys := 1
+	numberOfZeroTipTransactions := 0
+	s.insertBogusTransactions(numberOfTransactionsForEachPrivateKey,
+		numberOfZeroTipTransactions, numberOfPrivateKeys)
+
+	// Retrieve the proposed transaction from the pool
+	poolContent, err := s.RPCClient.GetPoolContent(
+		context.Background(),
+		s.p.proposerAddress,
+		s.p.protocolConfigs.BlockMaxGasLimit,
+		rpc.BlockMaxTxListBytes,
+		s.p.LocalAddresses,
+		s.p.MaxProposedTxListsPerEpoch,
+		0,
+		s.p.chainConfig,
+	)
+	s.Nil(err, "Failed to get pool content")
+	s.GreaterOrEqual(len(poolContent), 1, "Pool content should have at least one transaction list")
+	s.GreaterOrEqual(poolContent[0].TxList.Len(), 1, "Transaction list should have at least one transaction")
+
+	// Get the hash of the first transaction
+	txHash := poolContent[0].TxList[0].Hash()
+	log.Info("Proposing transaction", "txHash", txHash)
+	// Run ProposeOp to propose the transaction
+	s.Nil(s.p.ProposeOp(context.Background()), "ProposeOp should succeed")
+	s.Nil(s.s.ProcessL1Blocks(context.Background()))
+
+	// Ensure the transaction is marked as proposed
+	hasProposed, err := s.p.hasBeenProposed(txHash)
+	s.Nil(err, "hasBeenProposed should not return an error")
+	s.True(hasProposed, "Transaction should be marked as proposed")
+
+	// Run ProposeOp again
+	log.Info("Running ProposeOp again")
+	s.Nil(s.p.ProposeOp(context.Background()))
+	s.Nil(s.s.ProcessL1Blocks(context.Background()))
+
+	// Retrieve the pool content again
+	log.Info("Retrieving pool content again")
+	poolContentAfter, err := s.RPCClient.GetPoolContent(
+		context.Background(),
+		s.p.proposerAddress,
+		s.p.protocolConfigs.BlockMaxGasLimit,
+		rpc.BlockMaxTxListBytes,
+		s.p.LocalAddresses,
+		s.p.MaxProposedTxListsPerEpoch,
+		0,
+		s.p.chainConfig,
+	)
+	s.Nil(err, "Failed to get pool content after second ProposeOp")
+
+	// Ensure that the previously proposed transaction is no longer in the pool
+	for _, txs := range poolContentAfter {
+		for _, tx := range txs.TxList {
+			if tx.Hash() == txHash {
+				s.Fail("Previously proposed transaction should not be in the pool")
+			}
+		}
+	}
+}
+
+func (s *ProposerTestSuite) TestSaveProposalData() {
+	// Call ProposeOp to simulate a proposal operation
+	err := s.p.ProposeOp(context.Background())
+	s.Nil(s.s.ProcessL1Blocks(context.Background()))
+
+	s.Nil(err, "ProposeOp should succeed")
+
+	// Retrieve the proposal data from Redis
+	l1BlockNumber, err := s.p.redisClient.Get(context.Background(), "l1_block_number").Result()
+	log.Info("l1BlockNumber", "l1BlockNumber", l1BlockNumber)
+	s.Nil(err, "Failed to get l1_block_number from Redis")
+
+	l2BlockNumberStr, err := s.p.redisClient.Get(context.Background(), "l2_block_number").Result()
+	log.Info("l2BlockNumberStr", "l2BlockNumberStr", l2BlockNumberStr)
+	s.Nil(err, "Failed to get l2_block_number from Redis")
+
+	l1CostStr, err := s.p.redisClient.Get(context.Background(), "l1_cost").Result()
+	log.Info("l1CostStr", "l1CostStr", l1CostStr)
+	s.Nil(err, "Failed to get l1_cost from Redis")
+
+	totalEarningsStr, err := s.p.redisClient.Get(context.Background(), "total_earnings").Result()
+	log.Info("totalEarningsStr", "totalEarningsStr", totalEarningsStr)
+	s.Nil(err, "Failed to get total_earnings from Redis")
+
+	lastProposedAtStr, err := s.p.redisClient.Get(context.Background(), "last_proposed_at").Result()
+	log.Info("lastProposedAtStr", "lastProposedAtStr", lastProposedAtStr)
+	s.Nil(err, "Failed to get last_proposed_at from Redis")
+
+	totalNumberOfTxsStr, err := s.p.redisClient.Get(context.Background(), "total_number_of_txs").Result()
+	log.Info("totalNumberOfTxsStr", "totalNumberOfTxsStr", totalNumberOfTxsStr)
+	s.Nil(err, "Failed to get total_number_of_txs from Redis")
+
+	// Assert that the retrieved values are not empty
+	s.NotEmpty(l1BlockNumber, "l1_block_number should not be empty")
+	s.NotEmpty(l1CostStr, "l1_cost should not be empty")
+	s.NotEmpty(totalEarningsStr, "total_earnings should not be empty")
+	s.NotEmpty(lastProposedAtStr, "last_proposed_at should not be empty")
+	s.NotEmpty(totalNumberOfTxsStr, "total_number_of_txs should not be empty")
 }
 
 func (s *ProposerTestSuite) TearDownTest() {
