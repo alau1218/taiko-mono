@@ -2,7 +2,6 @@ package proposer
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -17,7 +16,6 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/redis/go-redis/v9"
 	"github.com/urfave/cli/v2"
 
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/bindings"
@@ -58,7 +56,20 @@ type Proposer struct {
 	ctx context.Context
 	wg  sync.WaitGroup
 
-	redisClient *redis.Client
+	// Mutex for concurrent access
+	proposalMutex sync.Mutex
+
+	// Maps to store proposal data
+	proposedTxHashes map[string]bool
+	proposalData     map[uint64]ProposalData // Define ProposalData struct as needed
+}
+
+// Define ProposalData struct
+type ProposalData struct {
+	L1Cost           *big.Int
+	TotalEarnings    *big.Int
+	TotalNumberOfTxs int
+	LastProposedAt   time.Time
 }
 
 const (
@@ -143,12 +154,10 @@ func (p *Proposer) InitFromConfig(
 		cfg.FallbackToCalldata,
 	)
 
-	p.redisClient = redis.NewClient(&redis.Options{
-		Addr:     cfg.RedisConfig.Address,
-		Password: cfg.RedisConfig.Password,
-		DB:       0, //Default DB
-	})
-	log.Info("Redis instantiated successfully", "address", cfg.RedisConfig.Address)
+	// Initialize maps
+	p.proposedTxHashes = make(map[string]bool)
+	p.proposalData = make(map[uint64]ProposalData)
+
 	return nil
 }
 
@@ -181,17 +190,6 @@ func (p *Proposer) eventLoop() {
 			metrics.ProposerProposeEpochCounter.Add(1)
 			p.totalEpochs++
 
-			//Update the L1 block number in Redis
-			//Before proposing, we check if the L1 block number is the same as the last proposed block number
-			//If it is, we skip the proposal
-			//If it is not, we propose the transactions
-			l1BlockNumber, err := p.rpc.L1.BlockNumber(p.ctx)
-			if err != nil {
-				log.Error("Failed to fetch L1 block number", "error", err)
-				return
-			}
-
-			p.recordL1BlockNumber(l1BlockNumber)
 			// Attempt a proposing operation
 			if err := p.ProposeOp(p.ctx); err != nil {
 				log.Error("Proposing operation error", "error", err)
@@ -265,11 +263,7 @@ func (p *Proposer) fetchPoolContent(filterPoolContent bool) ([]types.Transaction
 			var currentBlobSize uint64
 
 			for _, tx := range txs.TxList {
-				hasProposed, err := p.hasBeenProposed(tx.Hash())
-				if err != nil {
-					log.Error("Error checking if transaction has been proposed", "txHash", tx.Hash().Hex(), "error", err)
-					continue
-				}
+				hasProposed := p.hasBeenProposed(tx.Hash())
 				if hasProposed {
 					log.Info(
 						"Not including previously proposed transaction since blob space is limited",
@@ -373,11 +367,7 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 	for _, txs := range txLists {
 		var filteredTxs types.Transactions
 		for _, tx := range txs {
-			hasProposed, err := p.hasBeenProposed(tx.Hash())
-			if err != nil {
-				log.Error("Error checking if transaction has been proposed", "txHash", tx.Hash().Hex(), "error", err)
-				continue
-			}
+			hasProposed := p.hasBeenProposed(tx.Hash())
 			if hasProposed {
 				log.Info("Skipping previously proposed transaction", "txHash", tx.Hash().Hex())
 				continue
@@ -437,28 +427,36 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		utils.WeiToEther(l1Cost),
 	)
 
-	// Save proposal data to Redis
-	l2blockNumber, err := p.rpc.L2.BlockNumber(context.Background())
+	// Save proposal data using metrics
+	l1BlockNum, err := p.rpc.L1.BlockNumber(p.ctx)
 	if err != nil {
-		log.Error("Failed to get L2 block number", "error", err)
-		l2blockNumber = 0
-	}
+		log.Error("Failed to fetch L1 block number", "error", err)
+	} else {
+		// Record proposal data using metrics
+		p.proposalData[l1BlockNum] = ProposalData{
+			L1Cost:           l1Cost,
+			TotalEarnings:    totalEarnings,
+			TotalNumberOfTxs: totalNumberOfTxs,
+			LastProposedAt:   time.Now(),
+		}
 
-	err = p.saveProposalData(
-		p.getL1BlockNumber(),
-		l2blockNumber,
-		l1Cost,
-		totalEarnings,
-		totalNumberOfTxs,
-	)
-	if err != nil {
-		log.Error("Failed to save proposal data in Redis", "error", err)
-		return err
+		// Add to metrics engine
+		// When you have new data for a block
+		metrics.UpdateBlockMetrics(
+			int64(l1BlockNum),              // L1 block number
+			float64(l1Cost.Int64()),        // L1 cost as float64
+			float64(totalEarnings.Int64()), // total earnings as float64
+			time.Now().Unix(),              // proposed at timestamp
+			int64(totalNumberOfTxs),        // total number of txs
+		)
 	}
 
 	if totalEarnings.Cmp(l1Cost) > 0 {
 		log.Info("Expected profit, proposing transactions",
 			"profit", utils.WeiToEther(totalEarnings.Sub(totalEarnings, l1Cost)))
+		// Increment proposal counter
+		metrics.ProposerProposeEpochCounter.Add(1)
+
 		// Propose the transactions lists.
 		proposeStartTime := time.Now()
 		err = p.ProposeTxLists(ctx, txLists)
@@ -470,11 +468,7 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		// Mark all proposed transactions
 		for _, txs := range txLists {
 			for _, tx := range txs {
-				err := p.markAsProposed(tx.Hash())
-				if err != nil {
-					log.Warn("Failed to mark transaction as proposed", "txHash", tx.Hash().Hex(), "error", err)
-					return err
-				}
+				p.markAsProposed(tx.Hash())
 			}
 		}
 
@@ -482,8 +476,8 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		log.Info("L1 cost is greater than total earnings, skipping proposal",
 			"Deficit",
 			utils.WeiToEther(l1Cost.Sub(l1Cost, totalEarnings)))
-		return nil
 	}
+
 	return nil
 }
 
@@ -639,68 +633,23 @@ func (p *Proposer) calculateInitialWaitTime(timeLeftInSlot float64) time.Duratio
 	return time.Duration(waitTime * float64(time.Second))
 }
 
-// hasBeenProposed checks if the transaction hash exists in Redis.
-func (p *Proposer) hasBeenProposed(txHash common.Hash) (bool, error) {
-	exists, err := p.redisClient.Exists(p.ctx, txHash.Hex()).Result()
-	if err != nil {
-		return false, err
-	}
-	return exists == 1, nil
+func (p *Proposer) hasBeenProposed(txHash common.Hash) bool {
+	p.proposalMutex.Lock()
+	defer p.proposalMutex.Unlock()
+	_, exists := p.proposedTxHashes[txHash.Hex()]
+	return exists
 }
 
-// markAsProposed stores the transaction hash in Redis with a 24-hour expiration.
-func (p *Proposer) markAsProposed(txHash common.Hash) error {
-	err := p.redisClient.Set(p.ctx, txHash.Hex(), 1, 24*time.Hour).Err()
-	if err != nil {
-		return err
-	}
-	return nil
-}
+func (p *Proposer) markAsProposed(txHash common.Hash) {
+	p.proposalMutex.Lock()
+	defer p.proposalMutex.Unlock()
+	p.proposedTxHashes[txHash.Hex()] = true
 
-func (p *Proposer) recordL1BlockNumber(l1BlockNumber uint64) {
-	err := p.redisClient.Set(p.ctx, "l1_block_number", l1BlockNumber, 24*time.Hour).Err()
-	if err != nil {
-		log.Error("Failed to record L1 block number in Redis", "error", err)
-		return
-	}
-}
-
-func (p *Proposer) getL1BlockNumber() string {
-	l1BlockNumber, err := p.redisClient.Get(p.ctx, "l1_block_number").Result()
-	if err != nil {
-		return "0"
-	}
-	return l1BlockNumber
-}
-
-// saveProposalData saves the relevant proposal data to Redis.
-func (p *Proposer) saveProposalData(
-	l1BlockNumber string,
-	l2BlockNumber uint64,
-	l1Cost *big.Int,
-	totalEarnings *big.Int,
-	totalNumberOfTxs int) error {
-	// Create a proposal data structure
-	proposalData := map[string]interface{}{
-		"l1_block_number":     l1BlockNumber,
-		"l1_cost":             l1Cost.String(),
-		"total_earnings":      totalEarnings.String(),
-		"last_proposed_at":    p.lastProposedAt.Format(time.RFC3339), // Store as ISO 8601 string
-		"total_number_of_txs": totalNumberOfTxs,
-	}
-
-	// Marshal the proposal data to JSON
-	proposalDataJSON, err := json.Marshal(proposalData)
-	if err != nil {
-		log.Error("Failed to marshal proposal data to JSON", "error", err)
-		return err
-	}
-
-	// Save the proposal data in the format [l2_block_number] : [all the remaining data]
-	err = p.redisClient.Set(p.ctx, fmt.Sprintf("%d", l2BlockNumber), proposalDataJSON, 24*time.Hour).Err()
-	if err != nil {
-		log.Error("Failed to save proposal data in Redis", "l2_block_number", l2BlockNumber, "error", err)
-		return err
-	}
-	return nil
+	// Schedule removal after 1 hour
+	go func() {
+		time.Sleep(1 * time.Hour) // Sleep for 1 hour
+		p.proposalMutex.Lock()
+		defer p.proposalMutex.Unlock()
+		delete(p.proposedTxHashes, txHash.Hex())
+	}()
 }

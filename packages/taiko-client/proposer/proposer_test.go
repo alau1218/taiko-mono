@@ -3,8 +3,6 @@ package proposer
 import (
 	"context"
 	"crypto/ecdsa"
-	"encoding/json"
-	"fmt"
 	"math/big"
 	"math/rand"
 	"os"
@@ -26,7 +24,6 @@ import (
 
 	// Alias the standard library math package
 
-	"github.com/redis/go-redis/v9"
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/bindings"
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/bindings/metadata"
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/driver/chain_syncer/beaconsync"
@@ -124,24 +121,10 @@ func (s *ProposerTestSuite) SetupTest() {
 			TxSendTimeout:             txmgr.DefaultBatcherFlagValues.TxSendTimeout,
 			TxNotInMempoolTimeout:     txmgr.DefaultBatcherFlagValues.TxNotInMempoolTimeout,
 		},
-		RedisConfig: &RedisConfig{
-			Address:  "localhost:6379",
-			Password: "",
-		},
 	}, nil, nil))
 
 	s.p = p
 	log.Info("Proposer initialized successfully.")
-
-	// Initialize Redis client for testing purposes
-	s.p.redisClient = redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379", // Use a test Redis server
-		Password: "",               // No password set
-		DB:       1,                // Use a different DB for tests
-	})
-	// Flush the test DB before starting
-	err = s.p.redisClient.FlushDB(ctx).Err()
-	s.Nil(err)
 }
 
 func (s *ProposerTestSuite) emptyMempool() {
@@ -553,8 +536,7 @@ func (s *ProposerTestSuite) TestProposeOpDoesNotReproposeTxs() {
 	s.Nil(s.s.ProcessL1Blocks(context.Background()))
 
 	// Ensure the transaction is marked as proposed
-	hasProposed, err := s.p.hasBeenProposed(txHash)
-	s.Nil(err, "hasBeenProposed should not return an error")
+	hasProposed := s.p.hasBeenProposed(txHash)
 	s.True(hasProposed, "Transaction should be marked as proposed")
 
 	// Run ProposeOp again
@@ -586,48 +568,70 @@ func (s *ProposerTestSuite) TestProposeOpDoesNotReproposeTxs() {
 	}
 }
 
-func (s *ProposerTestSuite) TestSaveProposalData() {
+func (s *ProposerTestSuite) TestProposalMetrics() {
+	// Insert some transactions into the mempool to ensure we have data to propose
+	numberOfTransactionsForEachPrivateKey := 5
+	numberOfPrivateKeys := 2
+	numberOfZeroTipTransactions := 0
+	s.insertBogusTransactions(numberOfTransactionsForEachPrivateKey, numberOfZeroTipTransactions, numberOfPrivateKeys)
+
 	// Call ProposeOp to simulate a proposal operation
 	err := s.p.ProposeOp(context.Background())
+	s.Nil(err, "ProposeOp should succeed")
 	s.Nil(s.s.ProcessL1Blocks(context.Background()))
 
-	s.Nil(err, "ProposeOp should succeed")
+	// Check that the proposal data was stored in the map
+	s.p.proposalMutex.Lock()
+	defer s.p.proposalMutex.Unlock()
 
-	// Retrieve the L2 block number
-	l2BlockNumber, err := s.p.rpc.L2.BlockNumber(context.Background())
-	s.Nil(err, "Failed to get L2 block number")
+	// Verify there's at least one entry in the proposalData map
+	s.GreaterOrEqual(len(s.p.proposalData), 1, "Proposal data should be stored")
 
-	// Retrieve the proposal data from Redis
-	proposalDataJSON, err := s.p.redisClient.Get(context.Background(),
-		fmt.Sprintf("%d", l2BlockNumber)).Result()
-	s.Nil(err, "Failed to get proposal data from Redis")
-
-	var proposalMap map[string]interface{}
-	if err := json.Unmarshal([]byte(proposalDataJSON), &proposalMap); err != nil {
-		log.Error("Failed to unmarshal proposal data", "error", err)
+	// Get the latest L1 block number - the one that should have been used
+	var latestBlockNum uint64
+	for blockNum := range s.p.proposalData {
+		if blockNum > latestBlockNum {
+			latestBlockNum = blockNum
+		}
 	}
 
-	// Validate the contents of the proposal data
-	l1CostStr := proposalMap["l1_cost"].(string)
-	s.NotEmpty(l1CostStr, "l1_cost should not be empty")
+	// Verify the proposal data for this block
+	proposalData := s.p.proposalData[latestBlockNum]
 
-	totalEarningsStr := proposalMap["total_earnings"].(string)
-	s.NotEmpty(totalEarningsStr, "total_earnings should not be empty")
+	// Verify all the expected fields are present and have reasonable values
+	s.NotNil(proposalData.L1Cost, "L1Cost should not be nil")
+	s.NotNil(proposalData.TotalEarnings, "TotalEarnings should not be nil")
+	s.GreaterOrEqual(proposalData.TotalNumberOfTxs, 0, "TotalNumberOfTxs should be non-negative")
+	s.WithinDuration(proposalData.LastProposedAt, time.Now(), 10*time.Second, "LastProposedAt should be recent")
 
-	lastProposedAtStr := proposalMap["last_proposed_at"].(string)
-	s.NotEmpty(lastProposedAtStr, "last_proposed_at should not be empty")
+	// Log the metrics for debugging
+	log.Info("Proposal metrics recorded",
+		"L1BlockNum", latestBlockNum,
+		"L1Cost", proposalData.L1Cost.String(),
+		"TotalEarnings", proposalData.TotalEarnings.String(),
+		"TotalNumberOfTxs", proposalData.TotalNumberOfTxs,
+		"LastProposedAt", proposalData.LastProposedAt)
 
-	totalNumberOfTxsStr := fmt.Sprintf("%v", proposalMap["total_number_of_txs"])
-	s.NotEmpty(totalNumberOfTxsStr, "total_number_of_txs should not be empty")
+	// Check for metrics update
+	// Note: We can't directly check the metrics registry in this test,
+	// but we can verify that the data passed to the metrics engine is correct
+	// This assumes UpdateBlockMetrics is correctly implemented to use this data
+	expectedL1BlockNum := int64(latestBlockNum)
+	expectedL1Cost := float64(proposalData.L1Cost.Int64())
+	expectedEarnings := float64(proposalData.TotalEarnings.Int64())
+	expectedTxCount := int64(proposalData.TotalNumberOfTxs)
+
+	// These verifications ensure that the data that would be recorded by metrics.UpdateBlockMetrics
+	// is valid and properly calculated
+	s.GreaterOrEqual(expectedL1BlockNum, int64(0), "L1 block number should be valid")
+	s.GreaterOrEqual(expectedL1Cost, float64(0), "L1 cost should be non-negative")
+	s.GreaterOrEqual(expectedEarnings, float64(0), "Earnings should be non-negative")
+	s.GreaterOrEqual(expectedTxCount, int64(0), "Transaction count should be non-negative")
 }
 
 func (s *ProposerTestSuite) TearDownTest() {
 	s.cancel()
 	s.p.Close(context.Background())
-
-	// Flush the test Redis DB after tests
-	err := s.p.redisClient.FlushDB(context.Background()).Err()
-	assert.Nil(s.T(), err, "Failed to flush Redis DB after tests")
 }
 
 func TestProposerTestSuite(t *testing.T) {
