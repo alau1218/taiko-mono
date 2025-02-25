@@ -23,6 +23,7 @@ type Config struct {
 	*rpc.ClientConfig
 	L1ProposerPrivKey          *ecdsa.PrivateKey
 	L2SuggestedFeeRecipient    common.Address
+	ProposeInterval            time.Duration
 	LocalAddresses             []common.Address
 	LocalAddressesOnly         bool
 	MinGasUsed                 uint64
@@ -94,6 +95,7 @@ func NewConfigFromCliContext(c *cli.Context) (*Config, error) {
 		LocalAddresses:             localAddresses,
 		LocalAddressesOnly:         c.Bool(flags.TxPoolLocalsOnly.Name),
 		MinGasUsed:                 c.Uint64(flags.MinGasUsed.Name),
+		ProposeInterval:            c.Duration(flags.ProposeInterval.Name),
 		MinTxListBytes:             c.Uint64(flags.MinTxListBytes.Name),
 		MinTip:                     minTip.Uint64(),
 		MinProposingInternal:       c.Duration(flags.MinProposingInternal.Name),

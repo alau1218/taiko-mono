@@ -88,6 +88,7 @@ func (s *ProposerTestSuite) SetupTest() {
 		L1ProposerPrivKey:          l1ProposerPrivKey,
 		L2SuggestedFeeRecipient:    common.HexToAddress(os.Getenv("L2_SUGGESTED_FEE_RECIPIENT")),
 		MinProposingInternal:       0,
+		ProposeInterval:            1024 * time.Hour,
 		MaxProposedTxListsPerEpoch: 1,
 		ProposeBlockTxGasLimit:     10_000_000,
 		FallbackToCalldata:         true,

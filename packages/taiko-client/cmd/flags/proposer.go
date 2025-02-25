@@ -24,6 +24,14 @@ var (
 
 // Optional flags used by proposer.
 var (
+	// Proposing epoch related.
+	ProposeInterval = &cli.DurationFlag{
+		Name:     "epoch.interval",
+		Usage:    "Time interval to propose L2 pending transactions",
+		Category: proposerCategory,
+		Value:    0,
+		EnvVars:  []string{"EPOCH_INTERVAL"},
+	}
 	MinGasUsed = &cli.Uint64Flag{
 		Name:     "epoch.minGasUsed",
 		Usage:    "Minimum gas used for a transactions list to propose",
