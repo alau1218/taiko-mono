@@ -364,12 +364,13 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 
 	// Filter out transactions that have been proposed within the last 24 hours.
 	var filteredTxLists []types.Transactions
+	skippedTxs := 0
 	for _, txs := range txLists {
 		var filteredTxs types.Transactions
 		for _, tx := range txs {
 			hasProposed := p.hasBeenProposed(tx.Hash())
 			if hasProposed {
-				log.Info("Skipping previously proposed transaction", "txHash", tx.Hash().Hex())
+				skippedTxs++
 				continue
 			}
 			filteredTxs = append(filteredTxs, tx)
@@ -378,13 +379,14 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 			filteredTxLists = append(filteredTxLists, filteredTxs)
 		}
 	}
+	log.Info("Skipped transactions", "count", skippedTxs)
 	txLists = filteredTxLists
 
 	//Update the lastProposedAt to the current time before getting to the last part
 	p.lastProposedAt = time.Now()
 
 	// Retrieve the L2 base fee
-	baseFee, err := p.rpc.GetL2BaseFee(ctx, p.chainConfig)
+	l2BaseFee, err := p.rpc.GetL2BaseFee(ctx, p.chainConfig)
 	if err != nil {
 		log.Error("failed to get L2 base fee:", "error", err)
 		return nil
@@ -396,9 +398,9 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		for _, tx := range txs {
 			if tx.Gas() < 30000 {
 				discountedGas := tx.Gas() * 60 / 100 // Apply 40% discount
-				totalEarnings.Add(totalEarnings, new(big.Int).SetUint64(((baseFee.Uint64()*BaseFeePctToProposer)/100+tx.GasTipCap().Uint64())*discountedGas))
+				totalEarnings.Add(totalEarnings, new(big.Int).SetUint64(((l2BaseFee.Uint64()*BaseFeePctToProposer)/100+tx.GasTipCap().Uint64())*discountedGas))
 			} else {
-				totalEarnings.Add(totalEarnings, new(big.Int).SetUint64(((baseFee.Uint64()*BaseFeePctToProposer)/100+tx.GasTipCap().Uint64())*tx.Gas()))
+				totalEarnings.Add(totalEarnings, new(big.Int).SetUint64(((l2BaseFee.Uint64()*BaseFeePctToProposer)/100+tx.GasTipCap().Uint64())*tx.Gas()))
 			}
 			totalNumberOfTxs++
 		}
@@ -425,6 +427,16 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		utils.WeiToEther(totalEarnings),
 		"l1Cost",
 		utils.WeiToEther(l1Cost),
+		"totalNumberOfTxs",
+		totalNumberOfTxs,
+		"skippedTxs",
+		skippedTxs,
+		"L1BaseFee",
+		utils.WeiToEther(FeeHistory.BaseFee[1]),
+		"L1PriorityFee",
+		utils.WeiToEther(FeeHistory.Reward[0][0]),
+		"L2BaseFee",
+		utils.WeiToEther(l2BaseFee),
 	)
 
 	// Save proposal data using metrics
