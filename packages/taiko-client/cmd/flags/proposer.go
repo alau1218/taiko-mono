@@ -120,7 +120,6 @@ var ProposerFlags = MergeFlags(CommonFlags, []cli.Flag{
 	TaikoTokenAddress,
 	L1ProposerPrivKey,
 	L2SuggestedFeeRecipient,
-	ProposeInterval,
 	TxPoolLocals,
 	TxPoolLocalsOnly,
 	MinGasUsed,

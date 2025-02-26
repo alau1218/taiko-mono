@@ -16,7 +16,7 @@ RUN go mod download
 
 WORKDIR /taiko-mono/packages/${PACKAGE}
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o /taiko-mono/packages/${PACKAGE}/bin/${PACKAGE} /taiko-mono/packages/${PACKAGE}/cmd/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o /taiko-mono/packages/${PACKAGE}/bin/private-${PACKAGE} /taiko-mono/packages/${PACKAGE}/cmd/main.go
 
 FROM alpine:latest
 
@@ -25,6 +25,6 @@ ENV PACKAGE=${PACKAGE}
 
 RUN apk add --no-cache ca-certificates
 
-COPY --from=builder /taiko-mono/packages/${PACKAGE}/bin/${PACKAGE} /usr/local/bin/
+COPY --from=builder /taiko-mono/packages/${PACKAGE}/bin/private-${PACKAGE} /usr/local/bin/
 
-ENTRYPOINT /usr/local/bin/${PACKAGE}
+ENTRYPOINT /usr/local/bin/private-${PACKAGE}

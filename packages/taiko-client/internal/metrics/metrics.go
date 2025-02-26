@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"strconv"
 
 	opMetrics "github.com/ethereum-optimism/optimism/op-service/metrics"
 	txmgrMetrics "github.com/ethereum-optimism/optimism/op-service/txmgr/metrics"
@@ -35,6 +36,44 @@ var (
 	ProposerProposeByCalldata      = factory.NewCounter(prometheus.CounterOpts{Name: "proposer_propose_by_calldata"})
 	ProposerProposeByBlob          = factory.NewCounter(prometheus.CounterOpts{Name: "proposer_propose_by_blob"})
 	ProposerCostEstimationError    = factory.NewGauge(prometheus.GaugeOpts{Name: "proposer_cost_estimation_error"})
+	// New metrics for ProposeOp
+	// Block-specific metrics with L1 block number as a label
+	ProposerL1CostByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_l1_cost_by_block",
+			Help: "L1 cost for proposals by block number",
+		},
+		[]string{"l1_block_number"},
+	)
+
+	ProposerEarningsByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_earnings_by_block",
+			Help: "Total earnings from proposals by block number",
+		},
+		[]string{"l1_block_number"},
+	)
+
+	ProposerProposedAtByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_proposed_at_by_block",
+			Help: "Timestamp of proposal by block number",
+		},
+		[]string{"l1_block_number"},
+	)
+
+	ProposerNumberOfTxsByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_number_of_txs_by_block",
+			Help: "Number of transactions proposed by block number",
+		},
+		[]string{"number_of_txs"},
+	)
+
+	// New Metrics for ProposeOp
+	ProposerTotalDuration            = factory.NewGauge(prometheus.GaugeOpts{Name: "proposer_total_duration"})
+	ProposerFetchPoolContentDuration = factory.NewGauge(prometheus.GaugeOpts{Name: "proposer_fetch_pool_content_duration"})
+	ProposerProposeTxListsDuration   = factory.NewGauge(prometheus.GaugeOpts{Name: "proposer_propose_tx_lists_duration"})
 
 	// Prover
 	ProverLatestVerifiedIDGauge      = factory.NewGauge(prometheus.GaugeOpts{Name: "prover_latestVerified_id"})
@@ -130,4 +169,20 @@ func Serve(ctx context.Context, c *cli.Context) error {
 	rpc.BlockOnInterruptsContext(ctx)
 
 	return nil
+}
+
+// UpdateBlockMetrics updates the per-block metrics for a specific L1 block
+func UpdateBlockMetrics(
+	l1BlockNumber int64,
+	l1Cost float64,
+	totalEarnings float64,
+	proposedAt int64,
+	totalNumberOfTxs int64) {
+
+	blockNumberStr := strconv.FormatInt(l1BlockNumber, 10)
+
+	ProposerL1CostByBlock.WithLabelValues(blockNumberStr).Set(l1Cost)
+	ProposerEarningsByBlock.WithLabelValues(blockNumberStr).Set(totalEarnings)
+	ProposerProposedAtByBlock.WithLabelValues(blockNumberStr).Set(float64(proposedAt))
+	ProposerNumberOfTxsByBlock.WithLabelValues(strconv.FormatInt(totalNumberOfTxs, 10)).Set(0)
 }

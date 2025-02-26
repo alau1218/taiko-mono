@@ -47,4 +47,8 @@ if [ "$RUN_TESTS" == "true" ]; then
     go test -v -p=1 ./"$PACKAGE" -coverprofile=coverage.out -covermode=atomic -timeout=700s
 else
     echo "💻 Local dev net started"
+    # Keep the script running to maintain the dev net
+    tail -f /dev/null
+    # Alternatively, you can use:
+    # while true; do sleep 1000; done
 fi

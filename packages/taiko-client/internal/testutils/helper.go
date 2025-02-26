@@ -3,8 +3,8 @@ package testutils
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/rand"
 	"math/big"
+	"math/rand"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -250,6 +250,8 @@ func AssembleTestTx(
 	to *common.Address,
 	value *big.Int,
 	data []byte,
+	gasTipCap *big.Int,
+	gas uint64,
 ) (*types.Transaction, error) {
 	auth, err := bind.NewKeyedTransactorWithChainID(priv, client.ChainID)
 	if err != nil {
@@ -260,9 +262,9 @@ func AssembleTestTx(
 		To:        to,
 		Nonce:     nonce,
 		Value:     value,
-		GasTipCap: new(big.Int).SetUint64(10 * params.GWei),
+		GasTipCap: gasTipCap,
 		GasFeeCap: new(big.Int).SetUint64(20 * params.GWei),
-		Gas:       2_100_000,
+		Gas:       gas,
 		Data:      data,
 	}))
 	if err != nil {
