@@ -16,7 +16,7 @@ RUN go mod download
 
 WORKDIR /taiko-mono/packages/${PACKAGE}
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o /taiko-mono/packages/${PACKAGE}/bin/${PACKAGE} /taiko-mono/packages/${PACKAGE}/cmd/main.go
+RUN CGO_ENABLED=1 GOOS=linux go build -o /taiko-mono/packages/${PACKAGE}/bin/${PACKAGE} /taiko-mono/packages/${PACKAGE}/cmd/main.go
 
 FROM alpine:latest
 
