@@ -67,7 +67,31 @@ var (
 			Name: "proposer_number_of_txs_by_block",
 			Help: "Number of transactions proposed by block number",
 		},
-		[]string{"number_of_txs"},
+		[]string{"l1_block_number"},
+	)
+
+	ProposerL1BaseFeeByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_l1_base_fee_by_block",
+			Help: "L1 base fee for proposals by block number",
+		},
+		[]string{"l1_block_number"},
+	)
+
+	ProposerL1PriorityFeeByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_l1_priority_fee_by_block",
+			Help: "L1 priority fee for proposals by block number",
+		},
+		[]string{"l1_block_number"},
+	)
+
+	ProposerL2BaseFeeByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_l2_base_fee_by_block",
+			Help: "L2 base fee for proposals by block number",
+		},
+		[]string{"l1_block_number"},
 	)
 
 	// New Metrics for ProposeOp
@@ -177,12 +201,19 @@ func UpdateBlockMetrics(
 	l1Cost float64,
 	totalEarnings float64,
 	proposedAt int64,
-	totalNumberOfTxs int64) {
+	totalNumberOfTxs int64,
+	L1BaseFee float64,
+	L1PriorityFee float64,
+	L2BaseFee float64,
+) {
 
 	blockNumberStr := strconv.FormatInt(l1BlockNumber, 10)
 
 	ProposerL1CostByBlock.WithLabelValues(blockNumberStr).Set(l1Cost)
 	ProposerEarningsByBlock.WithLabelValues(blockNumberStr).Set(totalEarnings)
 	ProposerProposedAtByBlock.WithLabelValues(blockNumberStr).Set(float64(proposedAt))
-	ProposerNumberOfTxsByBlock.WithLabelValues(strconv.FormatInt(totalNumberOfTxs, 10)).Set(0)
+	ProposerNumberOfTxsByBlock.WithLabelValues(blockNumberStr).Set(float64(totalNumberOfTxs))
+	ProposerL1BaseFeeByBlock.WithLabelValues(blockNumberStr).Set(L1BaseFee)
+	ProposerL1PriorityFeeByBlock.WithLabelValues(blockNumberStr).Set(L1PriorityFee)
+	ProposerL2BaseFeeByBlock.WithLabelValues(blockNumberStr).Set(L2BaseFee)
 }

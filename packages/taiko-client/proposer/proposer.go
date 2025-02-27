@@ -73,8 +73,8 @@ type ProposalData struct {
 }
 
 const (
-	//GenesisTime int64 = 1606824023 // Ethereum Beacon Chain Genesis Time (Dec 1, 2020)
-	GenesisTime          int64   = 1695902400 // Genesis Time for Holesky
+	GenesisTime int64 = 1606824023 // Ethereum Beacon Chain Genesis Time (Dec 1, 2020)
+	// GenesisTime          int64   = 1695902400 // Genesis Time for Holesky
 	SlotTime             float64 = 12.0       // Each slot lasts 12 seconds
 	TimeGapToPropose     float64 = 3.0        // Time gap to propose in seconds
 	MaxBlobSpaceSize             = 128 * 1024 // Define the maximum blob space size as 128 KB
@@ -450,6 +450,9 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 			TotalEarnings:    totalEarnings,
 			TotalNumberOfTxs: totalNumberOfTxs,
 			LastProposedAt:   time.Now(),
+			L1BaseFee:        FeeHistory.BaseFee[1],
+			L1PriorityFee:    FeeHistory.Reward[0][0],
+			L2BaseFee:        l2BaseFee,
 		}
 
 		// Add to metrics engine
