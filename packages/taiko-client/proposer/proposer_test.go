@@ -569,67 +569,6 @@ func (s *ProposerTestSuite) TestProposeOpDoesNotReproposeTxs() {
 	}
 }
 
-func (s *ProposerTestSuite) TestProposalMetrics() {
-	// Insert some transactions into the mempool to ensure we have data to propose
-	numberOfTransactionsForEachPrivateKey := 5
-	numberOfPrivateKeys := 2
-	numberOfZeroTipTransactions := 0
-	s.insertBogusTransactions(numberOfTransactionsForEachPrivateKey, numberOfZeroTipTransactions, numberOfPrivateKeys)
-
-	// Call ProposeOp to simulate a proposal operation
-	err := s.p.ProposeOp(context.Background())
-	s.Nil(err, "ProposeOp should succeed")
-	s.Nil(s.s.ProcessL1Blocks(context.Background()))
-
-	// Check that the proposal data was stored in the map
-	s.p.proposalMutex.Lock()
-	defer s.p.proposalMutex.Unlock()
-
-	// Verify there's at least one entry in the proposalData map
-	s.GreaterOrEqual(len(s.p.proposalData), 1, "Proposal data should be stored")
-
-	// Get the latest L1 block number - the one that should have been used
-	var latestBlockNum uint64
-	for blockNum := range s.p.proposalData {
-		if blockNum > latestBlockNum {
-			latestBlockNum = blockNum
-		}
-	}
-
-	// Verify the proposal data for this block
-	proposalData := s.p.proposalData[latestBlockNum]
-
-	// Verify all the expected fields are present and have reasonable values
-	s.NotNil(proposalData.L1Cost, "L1Cost should not be nil")
-	s.NotNil(proposalData.TotalEarnings, "TotalEarnings should not be nil")
-	s.GreaterOrEqual(proposalData.TotalNumberOfTxs, 0, "TotalNumberOfTxs should be non-negative")
-	s.WithinDuration(proposalData.LastProposedAt, time.Now(), 10*time.Second, "LastProposedAt should be recent")
-
-	// Log the metrics for debugging
-	log.Info("Proposal metrics recorded",
-		"L1BlockNum", latestBlockNum,
-		"L1Cost", proposalData.L1Cost.String(),
-		"TotalEarnings", proposalData.TotalEarnings.String(),
-		"TotalNumberOfTxs", proposalData.TotalNumberOfTxs,
-		"LastProposedAt", proposalData.LastProposedAt)
-
-	// Check for metrics update
-	// Note: We can't directly check the metrics registry in this test,
-	// but we can verify that the data passed to the metrics engine is correct
-	// This assumes UpdateBlockMetrics is correctly implemented to use this data
-	expectedL1BlockNum := int64(latestBlockNum)
-	expectedL1Cost := float64(proposalData.L1Cost.Int64())
-	expectedEarnings := float64(proposalData.TotalEarnings.Int64())
-	expectedTxCount := int64(proposalData.TotalNumberOfTxs)
-
-	// These verifications ensure that the data that would be recorded by metrics.UpdateBlockMetrics
-	// is valid and properly calculated
-	s.GreaterOrEqual(expectedL1BlockNum, int64(0), "L1 block number should be valid")
-	s.GreaterOrEqual(expectedL1Cost, float64(0), "L1 cost should be non-negative")
-	s.GreaterOrEqual(expectedEarnings, float64(0), "Earnings should be non-negative")
-	s.GreaterOrEqual(expectedTxCount, int64(0), "Transaction count should be non-negative")
-}
-
 func (s *ProposerTestSuite) TearDownTest() {
 	s.cancel()
 	s.p.Close(context.Background())

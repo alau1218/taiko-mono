@@ -61,15 +61,6 @@ type Proposer struct {
 
 	// Maps to store proposal data
 	proposedTxHashes map[string]bool
-	proposalData     map[uint64]ProposalData // Define ProposalData struct as needed
-}
-
-// Define ProposalData struct
-type ProposalData struct {
-	L1Cost           *big.Int
-	TotalEarnings    *big.Int
-	TotalNumberOfTxs int
-	LastProposedAt   time.Time
 }
 
 const (
@@ -156,7 +147,6 @@ func (p *Proposer) InitFromConfig(
 
 	// Initialize maps
 	p.proposedTxHashes = make(map[string]bool)
-	p.proposalData = make(map[uint64]ProposalData)
 
 	return nil
 }
@@ -445,24 +435,17 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		log.Error("Failed to fetch L1 block number", "error", err)
 	} else {
 		// Record proposal data using metrics
-		p.proposalData[l1BlockNum] = ProposalData{
-			L1Cost:           l1Cost,
-			TotalEarnings:    totalEarnings,
-			TotalNumberOfTxs: totalNumberOfTxs,
-			LastProposedAt:   time.Now(),
-			L1BaseFee:        FeeHistory.BaseFee[1],
-			L1PriorityFee:    FeeHistory.Reward[0][0],
-			L2BaseFee:        l2BaseFee,
-		}
-
 		// Add to metrics engine
 		// When you have new data for a block
 		metrics.UpdateBlockMetrics(
-			int64(l1BlockNum),              // L1 block number
-			float64(l1Cost.Int64()),        // L1 cost as float64
-			float64(totalEarnings.Int64()), // total earnings as float64
-			time.Now().Unix(),              // proposed at timestamp
-			int64(totalNumberOfTxs),        // total number of txs
+			int64(l1BlockNum),                        // L1 block number
+			float64(l1Cost.Int64()),                  // L1 cost as float64
+			float64(totalEarnings.Int64()),           // total earnings as float64
+			time.Now().Unix(),                        // proposed at timestamp
+			int64(totalNumberOfTxs),                  // total number of txs
+			float64(FeeHistory.BaseFee[1].Int64()),   // L1 base fee
+			float64(FeeHistory.Reward[0][0].Int64()), // L1 priority fee
+			float64(l2BaseFee.Int64()),               // L2 base fee
 		)
 	}
 

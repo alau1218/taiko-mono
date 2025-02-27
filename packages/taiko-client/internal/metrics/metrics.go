@@ -2,7 +2,6 @@ package metrics
 
 import (
 	"context"
-	"strconv"
 
 	opMetrics "github.com/ethereum-optimism/optimism/op-service/metrics"
 	txmgrMetrics "github.com/ethereum-optimism/optimism/op-service/txmgr/metrics"
@@ -38,60 +37,46 @@ var (
 	ProposerCostEstimationError    = factory.NewGauge(prometheus.GaugeOpts{Name: "proposer_cost_estimation_error"})
 	// New metrics for ProposeOp
 	// Block-specific metrics with L1 block number as a label
-	ProposerL1CostByBlock = factory.NewGaugeVec(
+	ProposerL1Cost = factory.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "proposer_l1_cost_by_block",
-			Help: "L1 cost for proposals by block number",
+			Name: "proposer_l1_cost",
 		},
-		[]string{"l1_block_number"},
 	)
 
-	ProposerEarningsByBlock = factory.NewGaugeVec(
+	ProposerEarnings = factory.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "proposer_earnings_by_block",
-			Help: "Total earnings from proposals by block number",
+			Name: "proposer_earnings",
 		},
-		[]string{"l1_block_number"},
 	)
 
-	ProposerProposedAtByBlock = factory.NewGaugeVec(
+	ProposerProposedAt = factory.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "proposer_proposed_at_by_block",
-			Help: "Timestamp of proposal by block number",
+			Name: "proposer_proposed_at",
 		},
-		[]string{"l1_block_number"},
 	)
 
-	ProposerNumberOfTxsByBlock = factory.NewGaugeVec(
+	ProposerNumberOfTxs = factory.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "proposer_number_of_txs_by_block",
-			Help: "Number of transactions proposed by block number",
+			Name: "proposer_number_of_txs",
 		},
-		[]string{"l1_block_number"},
 	)
 
-	ProposerL1BaseFeeByBlock = factory.NewGaugeVec(
+	ProposerL1BaseFee = factory.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "proposer_l1_base_fee_by_block",
-			Help: "L1 base fee for proposals by block number",
+			Name: "proposer_l1_base_fee",
 		},
-		[]string{"l1_block_number"},
 	)
 
-	ProposerL1PriorityFeeByBlock = factory.NewGaugeVec(
+	ProposerL1PriorityFee = factory.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "proposer_l1_priority_fee_by_block",
-			Help: "L1 priority fee for proposals by block number",
+			Name: "proposer_l1_priority_fee",
 		},
-		[]string{"l1_block_number"},
 	)
 
-	ProposerL2BaseFeeByBlock = factory.NewGaugeVec(
+	ProposerL2BaseFee = factory.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "proposer_l2_base_fee_by_block",
-			Help: "L2 base fee for proposals by block number",
+			Name: "proposer_l2_base_fee",
 		},
-		[]string{"l1_block_number"},
 	)
 
 	// New Metrics for ProposeOp
@@ -207,13 +192,11 @@ func UpdateBlockMetrics(
 	L2BaseFee float64,
 ) {
 
-	blockNumberStr := strconv.FormatInt(l1BlockNumber, 10)
-
-	ProposerL1CostByBlock.WithLabelValues(blockNumberStr).Set(l1Cost)
-	ProposerEarningsByBlock.WithLabelValues(blockNumberStr).Set(totalEarnings)
-	ProposerProposedAtByBlock.WithLabelValues(blockNumberStr).Set(float64(proposedAt))
-	ProposerNumberOfTxsByBlock.WithLabelValues(blockNumberStr).Set(float64(totalNumberOfTxs))
-	ProposerL1BaseFeeByBlock.WithLabelValues(blockNumberStr).Set(L1BaseFee)
-	ProposerL1PriorityFeeByBlock.WithLabelValues(blockNumberStr).Set(L1PriorityFee)
-	ProposerL2BaseFeeByBlock.WithLabelValues(blockNumberStr).Set(L2BaseFee)
+	ProposerL1Cost.Set(l1Cost)
+	ProposerEarnings.Set(totalEarnings)
+	ProposerProposedAt.Set(float64(proposedAt))
+	ProposerNumberOfTxs.Set(float64(totalNumberOfTxs))
+	ProposerL1BaseFee.Set(L1BaseFee)
+	ProposerL1PriorityFee.Set(L1PriorityFee)
+	ProposerL2BaseFee.Set(L2BaseFee)
 }
