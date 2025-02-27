@@ -13,6 +13,12 @@ import (
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/pkg/rpc"
 )
 
+// WeiToEtherDivisor represents the conversion factor from wei to ether (1 ether = 10^18 wei)
+const WeiToEtherDivisor = 1e18
+
+// WeiToGweiDivisor represents the conversion factor from wei to gwei (1 gwei = 10^9 wei)
+const WeiToGweiDivisor = 1e9
+
 // Metrics
 var (
 	registry = opMetrics.NewRegistry()
@@ -191,12 +197,20 @@ func UpdateBlockMetrics(
 	L1PriorityFee float64,
 	L2BaseFee float64,
 ) {
+	// Convert from wei to ether
+	l1CostInEther := l1Cost / WeiToEtherDivisor
+	totalEarningsInEther := totalEarnings / WeiToEtherDivisor
 
-	ProposerL1Cost.Set(l1Cost)
-	ProposerEarnings.Set(totalEarnings)
+	// Convert from wei to gwei
+	l1BaseFeeInGwei := L1BaseFee / WeiToGweiDivisor
+	l1PriorityFeeInGwei := L1PriorityFee / WeiToGweiDivisor
+	l2BaseFeeInGwei := L2BaseFee / WeiToGweiDivisor
+
+	ProposerL1Cost.Set(l1CostInEther)
+	ProposerEarnings.Set(totalEarningsInEther)
 	ProposerProposedAt.Set(float64(proposedAt))
 	ProposerNumberOfTxs.Set(float64(totalNumberOfTxs))
-	ProposerL1BaseFee.Set(L1BaseFee)
-	ProposerL1PriorityFee.Set(L1PriorityFee)
-	ProposerL2BaseFee.Set(L2BaseFee)
+	ProposerL1BaseFee.Set(l1BaseFeeInGwei)
+	ProposerL1PriorityFee.Set(l1PriorityFeeInGwei)
+	ProposerL2BaseFee.Set(l2BaseFeeInGwei)
 }
