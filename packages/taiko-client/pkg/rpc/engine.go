@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/beacon/engine"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/your-project/log"
 )
 
 // EngineClient represents a RPC client connecting to an Ethereum Engine API
@@ -115,6 +117,9 @@ func (c *EngineClient) TxPoolContentWithMinTip(
 	defer cancel()
 	var result []*miner.PreBuiltTxList
 
+	// Start timer to measure RPC call duration
+	callStartTime := time.Now()
+
 	if err := c.CallContext(
 		timeoutCtx,
 		&result,
@@ -129,5 +134,12 @@ func (c *EngineClient) TxPoolContentWithMinTip(
 	); err != nil {
 		return nil, err
 	}
+
+	// Log the elapsed time
+	callDuration := time.Since(callStartTime)
+	log.Info("txPoolContentWithMinTip RPC call completed",
+		"duration", callDuration.Seconds(),
+		"txListsCount", len(result),
+	)
 	return result, nil
 }

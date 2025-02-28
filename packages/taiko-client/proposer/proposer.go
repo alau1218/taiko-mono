@@ -171,7 +171,7 @@ func (p *Proposer) eventLoop() {
 	}()
 
 	for {
-		log.Info("Event loop started", "Epochs", p.totalEpochs)
+		log.Info("Event loop started", "LastEpochId", p.totalEpochs)
 		p.updateProposingTicker()
 
 		select {
