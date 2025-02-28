@@ -68,7 +68,7 @@ const (
 	GenesisTime int64 = 1606824023 // Ethereum Beacon Chain Genesis Time (Dec 1, 2020)
 	// GenesisTime          int64   = 1695902400 // Genesis Time for Holesky
 	SlotTime             float64 = 12.0       // Each slot lasts 12 seconds
-	TimeGapToPropose     float64 = 3.0        // Time gap to propose in seconds
+	TimeGapToPropose     float64 = 3.5        // Time gap to propose in seconds
 	MaxBlobSpaceSize             = 128 * 1024 // Define the maximum blob space size as 128 KB
 	BaseFeePctToProposer         = 75         // The percentage of the base fee that the proposer will receive
 	DefaultL1GasSpent    int64   = 150000     // The amount of gas spent on L1
@@ -422,6 +422,7 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 
 	// Save proposal data using metrics
 	l1BlockNum, err := p.rpc.L1.BlockNumber(p.ctx)
+	proposedAt := SlotTime - p.getRemainingTimeLeftInL1Block(time.Now())
 	if err != nil {
 		log.Error("Failed to fetch L1 block number", "error", err)
 	} else {
@@ -429,19 +430,19 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		// Add to metrics engine
 		// When you have new data for a block
 		metrics.UpdateBlockMetrics(
-			int64(l1BlockNum),                                    // L1 block number
-			float64(l1Cost.Int64()),                              // L1 cost as float64
-			float64(totalEarnings.Int64()),                       // total earnings as float64
-			SlotTime-p.getRemainingTimeLeftInL1Block(time.Now()), // proposed at timestamp
-			int64(totalNumberOfTxs),                              // total number of txs
-			float64(FeeHistory.BaseFee[1].Int64()),               // L1 base fee
-			float64(FeeHistory.Reward[0][0].Int64()),             // L1 priority fee
+			int64(l1BlockNum),                        // L1 block number
+			float64(l1Cost.Int64()),                  // L1 cost as float64
+			float64(totalEarnings.Int64()),           // total earnings as float64
+			proposedAt,                               // proposed at timestamp
+			int64(totalNumberOfTxs),                  // total number of txs
+			float64(FeeHistory.BaseFee[1].Int64()),   // L1 base fee
+			float64(FeeHistory.Reward[0][0].Int64()), // L1 priority fee
 			float64(l2BaseFee.Int64()),
 			int64(l2BlockNum), // L2 block number
 		)
 	}
 
-	if totalEarnings.Cmp(l1Cost) > 0 {
+	if totalEarnings.Cmp(l1Cost) > 0 && proposedAt > (SlotTime-TimeGapToPropose) && proposedAt < SlotTime {
 		log.Info("Expected profit, proposing transactions",
 			"profit", utils.WeiToEther(totalEarnings.Sub(totalEarnings, l1Cost)))
 		// Increment proposal counter
@@ -463,9 +464,12 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		}
 
 	} else {
-		log.Info("L1 cost is greater than total earnings, skipping proposal",
-			"Deficit",
-			utils.WeiToEther(l1Cost.Sub(l1Cost, totalEarnings)))
+		log.Info("Skipping proposal",
+			"Profit/Deficit",
+			utils.WeiToEther(l1Cost.Sub(l1Cost, totalEarnings)),
+			"Proposed at",
+			proposedAt,
+		)
 	}
 
 	return nil
