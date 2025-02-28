@@ -71,6 +71,7 @@ const (
 	MaxBlobSpaceSize             = 128 * 1024 // Define the maximum blob space size as 128 KB
 	BaseFeePctToProposer         = 75         // The percentage of the base fee that the proposer will receive
 	DefaultL1GasSpent    int64   = 150000     // The amount of gas spent on L1
+	BlockGasDiscount             = 40         // The percentage of the gas discount
 )
 
 // InitFromCli initializes the given proposer instance based on the command line flags.
@@ -375,23 +376,29 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 	//Update the lastProposedAt to the current time before getting to the last part
 	p.lastProposedAt = time.Now()
 
-	// Retrieve the L2 base fee
+	// Retrieve the L2 base fee and L2 block number
 	l2BaseFee, err := p.rpc.GetL2BaseFee(ctx, p.chainConfig)
 	if err != nil {
 		log.Error("failed to get L2 base fee:", "error", err)
 		return nil
 	}
 
+	l2BlockNum, err := p.rpc.L2.BlockNumber(ctx)
+	if err != nil {
+		log.Error("Failed to fetch L2 block number", "error", err)
+	}
+
 	totalEarnings := new(big.Int).SetUint64(0)
 	totalNumberOfTxs := 0
 	for _, txs := range txLists {
 		for _, tx := range txs {
-			if tx.Gas() < 30000 {
-				discountedGas := tx.Gas() * 60 / 100 // Apply 40% discount
-				totalEarnings.Add(totalEarnings, new(big.Int).SetUint64(((l2BaseFee.Uint64()*BaseFeePctToProposer)/100+tx.GasTipCap().Uint64())*discountedGas))
-			} else {
-				totalEarnings.Add(totalEarnings, new(big.Int).SetUint64(((l2BaseFee.Uint64()*BaseFeePctToProposer)/100+tx.GasTipCap().Uint64())*tx.Gas()))
+			discountedGas := tx.Gas()
+			if tx.Gas() > 30000 {
+				discountedGas = tx.Gas() * BlockGasDiscount / 100 // Apply gas discount
 			}
+			totalEarnings.Add(totalEarnings,
+				new(big.Int).SetUint64((((l2BaseFee.Uint64()*BaseFeePctToProposer)/100)+tx.GasTipCap().Uint64())*discountedGas))
+
 			totalNumberOfTxs++
 		}
 		if err != nil {
@@ -412,23 +419,6 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 	l1Cost.Add(l1Cost, FeeHistory.Reward[0][0])       // Add the priority fee to the base fee
 	l1Cost.Mul(l1Cost, big.NewInt(DefaultL1GasSpent)) // Multiply by 150000
 
-	log.Info("Earnings and L1 cost",
-		"totalEarnings",
-		utils.WeiToEther(totalEarnings),
-		"l1Cost",
-		utils.WeiToEther(l1Cost),
-		"totalNumberOfTxs",
-		totalNumberOfTxs,
-		"skippedTxs",
-		skippedTxs,
-		"L1BaseFee",
-		utils.WeiToEther(FeeHistory.BaseFee[1]),
-		"L1PriorityFee",
-		utils.WeiToEther(FeeHistory.Reward[0][0]),
-		"L2BaseFee",
-		utils.WeiToEther(l2BaseFee),
-	)
-
 	// Save proposal data using metrics
 	l1BlockNum, err := p.rpc.L1.BlockNumber(p.ctx)
 	if err != nil {
@@ -445,7 +435,8 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 			int64(totalNumberOfTxs),                  // total number of txs
 			float64(FeeHistory.BaseFee[1].Int64()),   // L1 base fee
 			float64(FeeHistory.Reward[0][0].Int64()), // L1 priority fee
-			float64(l2BaseFee.Int64()),               // L2 base fee
+			float64(l2BaseFee.Int64()),
+			int64(l2BlockNum), // L2 block number
 		)
 	}
 

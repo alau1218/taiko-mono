@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"strconv"
 
 	opMetrics "github.com/ethereum-optimism/optimism/op-service/metrics"
 	txmgrMetrics "github.com/ethereum-optimism/optimism/op-service/txmgr/metrics"
@@ -49,10 +50,24 @@ var (
 		},
 	)
 
+	ProposerL1CostByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_l1_cost_by_block",
+		},
+		[]string{"block_number"},
+	)
+
 	ProposerEarnings = factory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "proposer_earnings",
 		},
+	)
+
+	ProposerEarningsByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_earnings_by_block",
+		},
+		[]string{"block_number"},
 	)
 
 	ProposerProposedAt = factory.NewGauge(
@@ -61,10 +76,24 @@ var (
 		},
 	)
 
+	ProposerProposedAtByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_proposed_at_by_block",
+		},
+		[]string{"block_number"},
+	)
+
 	ProposerNumberOfTxs = factory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "proposer_number_of_txs",
 		},
+	)
+
+	ProposerNumberOfTxsByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_number_of_txs_by_block",
+		},
+		[]string{"block_number"},
 	)
 
 	ProposerL1BaseFee = factory.NewGauge(
@@ -73,16 +102,44 @@ var (
 		},
 	)
 
+	ProposerL1BaseFeeByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_l1_base_fee_by_block",
+		},
+		[]string{"block_number"},
+	)
+
 	ProposerL1PriorityFee = factory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "proposer_l1_priority_fee",
 		},
 	)
 
+	ProposerL1PriorityFeeByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_l1_priority_fee_by_block",
+		},
+		[]string{"block_number"},
+	)
+
 	ProposerL2BaseFee = factory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "proposer_l2_base_fee",
 		},
+	)
+
+	ProposerL2BaseFeeByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_l2_base_fee_by_block",
+		},
+		[]string{"block_number"},
+	)
+
+	ProposerL2BlockNumberByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_l2_block_number_by_block",
+		},
+		[]string{"block_number"},
 	)
 
 	// New Metrics for ProposeOp
@@ -196,6 +253,7 @@ func UpdateBlockMetrics(
 	L1BaseFee float64,
 	L1PriorityFee float64,
 	L2BaseFee float64,
+	L2BlockNumber int64,
 ) {
 	// Convert from wei to ether
 	l1CostInEther := l1Cost / WeiToEtherDivisor
@@ -213,4 +271,14 @@ func UpdateBlockMetrics(
 	ProposerL1BaseFee.Set(l1BaseFeeInGwei)
 	ProposerL1PriorityFee.Set(l1PriorityFeeInGwei)
 	ProposerL2BaseFee.Set(l2BaseFeeInGwei)
+
+	l1BlockNumberStr := strconv.FormatInt(l1BlockNumber, 10)
+
+	ProposerL1CostByBlock.WithLabelValues(l1BlockNumberStr).Set(l1CostInEther)
+	ProposerEarningsByBlock.WithLabelValues(l1BlockNumberStr).Set(totalEarningsInEther)
+	ProposerProposedAtByBlock.WithLabelValues(l1BlockNumberStr).Set(float64(proposedAt))
+	ProposerNumberOfTxsByBlock.WithLabelValues(l1BlockNumberStr).Set(float64(totalNumberOfTxs))
+	ProposerL1BaseFeeByBlock.WithLabelValues(l1BlockNumberStr).Set(l1BaseFeeInGwei)
+	ProposerL1PriorityFeeByBlock.WithLabelValues(l1BlockNumberStr).Set(l1PriorityFeeInGwei)
+	ProposerL2BlockNumberByBlock.WithLabelValues(l1BlockNumberStr).Set(float64(L2BlockNumber))
 }
