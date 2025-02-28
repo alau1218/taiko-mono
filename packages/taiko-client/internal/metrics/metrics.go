@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"math"
 	"strconv"
 
 	opMetrics "github.com/ethereum-optimism/optimism/op-service/metrics"
@@ -248,7 +249,7 @@ func UpdateBlockMetrics(
 	l1BlockNumber int64,
 	l1Cost float64,
 	totalEarnings float64,
-	proposedAt int64,
+	proposedAt float64,
 	totalNumberOfTxs int64,
 	L1BaseFee float64,
 	L1PriorityFee float64,
@@ -276,7 +277,7 @@ func UpdateBlockMetrics(
 
 	ProposerL1CostByBlock.WithLabelValues(l1BlockNumberStr).Set(l1CostInEther)
 	ProposerEarningsByBlock.WithLabelValues(l1BlockNumberStr).Set(totalEarningsInEther)
-	ProposerProposedAtByBlock.WithLabelValues(l1BlockNumberStr).Set(float64(proposedAt))
+	ProposerProposedAtByBlock.WithLabelValues(l1BlockNumberStr).Set(math.Round(proposedAt*10000) / 10000)
 	ProposerNumberOfTxsByBlock.WithLabelValues(l1BlockNumberStr).Set(float64(totalNumberOfTxs))
 	ProposerL1BaseFeeByBlock.WithLabelValues(l1BlockNumberStr).Set(l1BaseFeeInGwei)
 	ProposerL1PriorityFeeByBlock.WithLabelValues(l1BlockNumberStr).Set(l1PriorityFeeInGwei)

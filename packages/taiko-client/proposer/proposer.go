@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"sort"
 	"sync"
@@ -428,13 +429,13 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		// Add to metrics engine
 		// When you have new data for a block
 		metrics.UpdateBlockMetrics(
-			int64(l1BlockNum),                        // L1 block number
-			float64(l1Cost.Int64()),                  // L1 cost as float64
-			float64(totalEarnings.Int64()),           // total earnings as float64
-			time.Now().Unix(),                        // proposed at timestamp
-			int64(totalNumberOfTxs),                  // total number of txs
-			float64(FeeHistory.BaseFee[1].Int64()),   // L1 base fee
-			float64(FeeHistory.Reward[0][0].Int64()), // L1 priority fee
+			int64(l1BlockNum),                                    // L1 block number
+			float64(l1Cost.Int64()),                              // L1 cost as float64
+			float64(totalEarnings.Int64()),                       // total earnings as float64
+			SlotTime-p.getRemainingTimeLeftInL1Block(time.Now()), // proposed at timestamp
+			int64(totalNumberOfTxs),                              // total number of txs
+			float64(FeeHistory.BaseFee[1].Int64()),               // L1 base fee
+			float64(FeeHistory.Reward[0][0].Int64()),             // L1 priority fee
 			float64(l2BaseFee.Int64()),
 			int64(l2BlockNum), // L2 block number
 		)
@@ -553,25 +554,47 @@ func (p *Proposer) updateProposingTicker() {
 		p.proposingTimer.Stop()
 	}
 
-	if p.totalEpochs == 0 {
-		// Calculate the initial wait time to align with the L1 block
-		// Get the time left in the current L1 block slot
-		timeLeftInSlot := p.getRemainingTimeLeftInL1Block()
-		initialWaitTime := p.calculateInitialWaitTime(timeLeftInSlot)
-		log.Info("We will sleep till our clock get aligned with the L1 block",
-			"initialWaitTime", initialWaitTime)
-		p.proposingTimer = time.NewTimer(initialWaitTime)
-	} else {
-		// we will wakeup the proposer every slottime
-		slotDuration := time.Duration(SlotTime) * time.Second
+	// Calculate the time until the next target point in the L1 block cycle
+	// This will be at SlotTime - TimeGapToPropose (9th second) of each block
+	nextRunTime := p.calculateTimeToNextProposingPoint()
 
-		// Set the proposing timer
-		p.proposingTimer = time.NewTimer(slotDuration)
-	}
+	log.Info("Scheduling next proposal",
+		"timeUntilNextRun", nextRunTime.Seconds(),
+		"targetSecondInBlock", SlotTime-TimeGapToPropose)
+
+	p.proposingTimer = time.NewTimer(nextRunTime)
 }
 
-func (p *Proposer) getRemainingTimeLeftInL1Block() (timeLeft float64) {
-	currentTime := float64(time.Now().UTC().UnixNano()) / 1e9 // Get current UTC time in seconds (float64)
+// calculateTimeToNextProposingPoint calculates the duration until we should run
+// the next proposeOp, targeting exactly the (SlotTime - TimeGapToPropose) second
+// of each L1 block.
+func (p *Proposer) calculateTimeToNextProposingPoint() time.Duration {
+	now := time.Now().UTC()
+	currentTime := float64(now.UnixNano()) / 1e9 // Current time in seconds
+	elapsedSinceGenesis := currentTime - float64(GenesisTime)
+
+	// Calculate which slot we're in
+	currentSlot := elapsedSinceGenesis / SlotTime
+
+	// Calculate the start time of the current slot
+	currentSlotStartTime := float64(GenesisTime) + (math.Floor(currentSlot) * SlotTime)
+
+	// Calculate the target time within the slot (SlotTime - TimeGapToPropose seconds after slot start)
+	targetPointInCurrentSlot := currentSlotStartTime + (SlotTime - TimeGapToPropose)
+
+	// If we've already passed the target point in the current slot, aim for the next slot
+	if currentTime >= targetPointInCurrentSlot {
+		targetPointInCurrentSlot += SlotTime
+	}
+
+	// Calculate the duration until the target point
+	waitDuration := targetPointInCurrentSlot - currentTime
+
+	return time.Duration(waitDuration * float64(time.Second))
+}
+
+func (p *Proposer) getRemainingTimeLeftInL1Block(inputTime time.Time) (timeLeft float64) {
+	currentTime := float64(inputTime.UTC().UnixNano()) / 1e9 // Get current UTC time in seconds (float64)
 	elapsedTime := currentTime - float64(GenesisTime)
 
 	slot := int64(elapsedTime / float64(SlotTime))               // Compute current slot
@@ -605,21 +628,6 @@ func (p *Proposer) sendTx(ctx context.Context, txCandidate *txmgr.TxCandidate) e
 // Name returns the application name.
 func (p *Proposer) Name() string {
 	return "proposer"
-}
-
-func (p *Proposer) calculateInitialWaitTime(timeLeftInSlot float64) time.Duration {
-	// If the time left in the slot is less than TimeGapToPropose, wait for the next slot
-	if timeLeftInSlot < TimeGapToPropose {
-		timeLeftInSlot += float64(SlotTime)
-	}
-
-	// Calculate the initial wait time to align with the next L1 block
-	waitTime := timeLeftInSlot - TimeGapToPropose
-	if waitTime < 0 {
-		waitTime = 0 // Ensure wait time is not negative
-	}
-
-	return time.Duration(waitTime * float64(time.Second))
 }
 
 func (p *Proposer) hasBeenProposed(txHash common.Hash) bool {
