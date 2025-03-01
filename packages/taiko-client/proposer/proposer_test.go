@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"fmt"
+	"math"
 	"math/big"
 	"math/rand"
 	"os"
@@ -14,7 +15,6 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/txmgr"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/log"
@@ -718,12 +718,12 @@ func testCalculateTimeToNextPoint(now time.Time, genesisTimeUnix int64, slotTime
 // correctly implements the same algorithm as the actual proposer code
 func TestHelperMatchesActualImplementation(t *testing.T) {
 	testTimes := []time.Time{
-		time.Unix(TestGenesisTime, 0),                                        // Genesis
-		time.Unix(TestGenesisTime+5, 0),                                      // 5 seconds in
-		time.Unix(TestGenesisTime+int64(SlotTime-1), 0),                      // End of block
-		time.Unix(TestGenesisTime+int64(SlotTime*1.5), 0),                    // Middle of block 2
-		time.Unix(TestGenesisTime+int64(SlotTime*2.0-TimeGapToPropose), 0),   // At target point in block 2
-		time.Unix(TestGenesisTime+int64(SlotTime*2.0-TimeGapToPropose+1), 0), // Just after target
+		time.Unix(TestGenesisTime, 0),                                                    // Genesis
+		time.Unix(TestGenesisTime+5, 0),                                                  // 5 seconds in
+		time.Unix(TestGenesisTime+int64(SlotTime-1), 0),                                  // End of block
+		time.Unix(TestGenesisTime+int64(SlotTime*1.5), 0),                                // Middle of block 2
+		time.Unix(TestGenesisTime+int64(math.Round(SlotTime*2.0-TimeGapToPropose)), 0),   // At target point in block 2
+		time.Unix(TestGenesisTime+int64(math.Round(SlotTime*2.0-TimeGapToPropose+1)), 0), // Just after target
 	}
 
 	for i, testTime := range testTimes {

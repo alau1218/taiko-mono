@@ -143,7 +143,26 @@ var (
 		[]string{"block_number"},
 	)
 
-	// New Metrics for ProposeOp
+	ProposerBlockProposedToTaikoByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_block_proposed_to_taiko_by_block",
+		},
+		[]string{"block_number"},
+	)
+
+	ProposerL1TxTotalFeeByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_l1_tx_total_fee_by_block",
+		},
+		[]string{"block_number"},
+	)
+
+	ProposerL1TxGasTipCapByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_l1_tx_gas_tip_cap_by_block",
+		},
+		[]string{"block_number"},
+	)
 	ProposerTotalDuration            = factory.NewGauge(prometheus.GaugeOpts{Name: "proposer_total_duration"})
 	ProposerFetchPoolContentDuration = factory.NewGauge(prometheus.GaugeOpts{Name: "proposer_fetch_pool_content_duration"})
 	ProposerProposeTxListsDuration   = factory.NewGauge(prometheus.GaugeOpts{Name: "proposer_propose_tx_lists_duration"})
@@ -255,6 +274,9 @@ func UpdateBlockMetrics(
 	L1PriorityFee float64,
 	L2BaseFee float64,
 	L2BlockNumber int64,
+	blockProposedToTaiko bool,
+	l1TxtotalFee float64,
+	l1TxGasTipCap float64,
 ) {
 	// Convert from wei to ether
 	l1CostInEther := l1Cost / WeiToEtherDivisor
@@ -282,4 +304,13 @@ func UpdateBlockMetrics(
 	ProposerL1BaseFeeByBlock.WithLabelValues(l1BlockNumberStr).Set(l1BaseFeeInGwei)
 	ProposerL1PriorityFeeByBlock.WithLabelValues(l1BlockNumberStr).Set(l1PriorityFeeInGwei)
 	ProposerL2BlockNumberByBlock.WithLabelValues(l1BlockNumberStr).Set(float64(L2BlockNumber))
+
+	// Convert boolean to float64: 1.0 for true, 0.0 for false
+	boolValue := 0.0
+	if blockProposedToTaiko {
+		boolValue = 1.0
+	}
+	ProposerBlockProposedToTaikoByBlock.WithLabelValues(l1BlockNumberStr).Set(boolValue)
+	ProposerL1TxTotalFeeByBlock.WithLabelValues(l1BlockNumberStr).Set(l1TxtotalFee)
+	ProposerL1TxGasTipCapByBlock.WithLabelValues(l1BlockNumberStr).Set(l1TxGasTipCap)
 }
