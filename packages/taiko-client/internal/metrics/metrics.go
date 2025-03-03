@@ -143,6 +143,13 @@ var (
 		[]string{"block_number"},
 	)
 
+	ProposerL2ActualNumberOfTxsByL2Block = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_l2_actual_number_of_txs_by_l2_block",
+		},
+		[]string{"l2_block_number"},
+	)
+
 	ProposerBlockProposedToTaikoByBlock = factory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "proposer_block_proposed_to_taiko_by_block",
@@ -150,19 +157,27 @@ var (
 		[]string{"block_number"},
 	)
 
-	ProposerL1TxTotalFeeByBlock = factory.NewGaugeVec(
+	ProposerL1ActualTotalFeeByBlock = factory.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "proposer_l1_tx_total_fee_by_block",
+			Name: "proposer_l1_actual_total_fee_by_block",
 		},
 		[]string{"block_number"},
 	)
 
-	ProposerL1TxGasTipCapByBlock = factory.NewGaugeVec(
+	ProposerL1ActualGasTipCapByBlock = factory.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "proposer_l1_tx_gas_tip_cap_by_block",
+			Name: "proposer_l1_actual_gas_tip_cap_by_block",
 		},
 		[]string{"block_number"},
 	)
+
+	ProposerL1TxAssociatedL2BlockIdByBlock = factory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "proposer_l1_tx_associated_l2_block_id_by_block",
+		},
+		[]string{"block_number"},
+	)
+
 	ProposerTotalDuration            = factory.NewGauge(prometheus.GaugeOpts{Name: "proposer_total_duration"})
 	ProposerFetchPoolContentDuration = factory.NewGauge(prometheus.GaugeOpts{Name: "proposer_fetch_pool_content_duration"})
 	ProposerProposeTxListsDuration   = factory.NewGauge(prometheus.GaugeOpts{Name: "proposer_propose_tx_lists_duration"})
@@ -277,6 +292,8 @@ func UpdateBlockMetrics(
 	blockProposedToTaiko bool,
 	l1TxtotalFee float64,
 	l1TxGasTipCap float64,
+	L2NumberOfTxs int64,
+	l1TxAssociatedl2BlockId uint64,
 ) {
 	// Convert from wei to ether
 	l1CostInEther := l1Cost / WeiToEtherDivisor
@@ -303,14 +320,21 @@ func UpdateBlockMetrics(
 	ProposerNumberOfTxsByBlock.WithLabelValues(l1BlockNumberStr).Set(float64(totalNumberOfTxs))
 	ProposerL1BaseFeeByBlock.WithLabelValues(l1BlockNumberStr).Set(l1BaseFeeInGwei)
 	ProposerL1PriorityFeeByBlock.WithLabelValues(l1BlockNumberStr).Set(l1PriorityFeeInGwei)
-	ProposerL2BlockNumberByBlock.WithLabelValues(l1BlockNumberStr).Set(float64(L2BlockNumber))
 
 	// Convert boolean to float64: 1.0 for true, 0.0 for false
 	boolValue := 0.0
 	if blockProposedToTaiko {
 		boolValue = 1.0
 	}
+
+	l1TxTotalFeeInEther := l1TxtotalFee / WeiToEtherDivisor
+	l1TxGasTipCapInGwei := l1TxGasTipCap / WeiToGweiDivisor
+
 	ProposerBlockProposedToTaikoByBlock.WithLabelValues(l1BlockNumberStr).Set(boolValue)
-	ProposerL1TxTotalFeeByBlock.WithLabelValues(l1BlockNumberStr).Set(l1TxtotalFee)
-	ProposerL1TxGasTipCapByBlock.WithLabelValues(l1BlockNumberStr).Set(l1TxGasTipCap)
+	ProposerL1ActualTotalFeeByBlock.WithLabelValues(l1BlockNumberStr).Set(l1TxTotalFeeInEther)
+	ProposerL1ActualGasTipCapByBlock.WithLabelValues(l1BlockNumberStr).Set(l1TxGasTipCapInGwei)
+	ProposerL1TxAssociatedL2BlockIdByBlock.WithLabelValues(l1BlockNumberStr).Set(float64(l1TxAssociatedl2BlockId))
+
+	ProposerL2ActualNumberOfTxsByL2Block.WithLabelValues(strconv.FormatInt(L2BlockNumber, 10)).Set(float64(L2NumberOfTxs))
+
 }

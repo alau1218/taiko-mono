@@ -20,7 +20,6 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/urfave/cli/v2"
 
-	"github.com/ethereum/go-ethereum"
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/bindings"
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/bindings/encoding"
 	"github.com/taikoxyz/taiko-mono/packages/taiko-client/internal/metrics"
@@ -69,14 +68,28 @@ type Proposer struct {
 const (
 	GenesisTime int64 = 1606824023 // Ethereum Beacon Chain Genesis Time (Dec 1, 2020)
 	// GenesisTime          int64   = 1695902400 // Genesis Time for Holesky
-	SlotTime              float64 = 12.0       // Each slot lasts 12 seconds
-	TimeGapToPropose      float64 = 3.5        // Time gap to propose in seconds
-	MaxBlobSpaceSize              = 128 * 1024 // Define the maximum blob space size as 128 KB
-	BaseFeePctToProposer          = 75         // The percentage of the base fee that the proposer will receive
-	DefaultL1GasSpent     int64   = 150000     // The amount of gas spent on L1
-	DefaultL1BlobGasSpent int64   = 131072     // The amount of gas spent on L1 blob
-	BlockGasDiscount              = 40         // The percentage of the gas discount
+	SlotTime                float64 = 12.0       // Each slot lasts 12 seconds
+	TimeGapToPropose        float64 = 3.5        // Time gap to propose in seconds
+	MaxBlobSpaceSize                = 128 * 1024 // Define the maximum blob space size as 128 KB
+	BaseFeePctToProposer            = 75         // The percentage of the base fee that the proposer will receive
+	DefaultL1GasSpent               = 150000     // The amount of gas spent on L1
+	DefaultL1BlobGasSpent           = 131072     // The amount of gas spent on L1 blob
+	DefaultL1ProverGasSpent         = 200000     // 200k gas for prover
+	BlockGasDiscount                = 40         // The percentage of the gas discount
 )
+
+// L2BlockData contains the necessary L2 block information for proposing decisions
+type L2BlockData struct {
+	Block     *types.Block
+	BaseFee   *big.Int
+	GasPrice  *big.Int
+	Timestamp time.Time
+	Number    uint64
+	Hash      common.Hash
+	TxCount   int
+	GasUsed   uint64
+	GasLimit  uint64
+}
 
 // InitFromCli initializes the given proposer instance based on the command line flags.
 func (p *Proposer) InitFromCli(ctx context.Context, c *cli.Context) error {
@@ -387,11 +400,6 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		return nil
 	}
 
-	l2BlockNum, err := p.rpc.L2.BlockNumber(ctx)
-	if err != nil {
-		log.Error("Failed to fetch L2 block number", "error", err)
-	}
-
 	totalEarnings := new(big.Int).SetUint64(0)
 	totalNumberOfTxs := 0
 	for _, txs := range txLists {
@@ -419,22 +427,24 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 	}
 
 	// Use the Add method to sum the base fee and reward
-	l1Cost := new(big.Int).Set(FeeHistory.BaseFee[1]) // Create a new big.Int and set it to BaseFee[1]
-	l1Cost.Add(l1Cost, FeeHistory.Reward[0][0])       // Add the priority fee to the base fee
+	l1BaseFeeAndPrioFee := new(big.Int).Set(FeeHistory.BaseFee[1])        // Create a new big.Int and set it to BaseFee[1]
+	l1BaseFeeAndPrioFee.Add(l1BaseFeeAndPrioFee, FeeHistory.Reward[0][0]) // Add the priority fee to the base fee
+	l1Cost := new(big.Int).Set(l1BaseFeeAndPrioFee)
 	l1Cost.Mul(l1Cost, big.NewInt(DefaultL1GasSpent)) // Multiply by 150000
+	//And there is a proveBlock fee
+	l1ProvingCost := new(big.Int).SetUint64(DefaultL1ProverGasSpent)
+	l1ProvingCost.Mul(l1ProvingCost, l1BaseFeeAndPrioFee) // Multiply by the fee
+	l1Cost.Add(l1Cost, l1ProvingCost)
+
 	l1TxBlobCost := p.calculateBlobCost()
 	// Add blob cost to total L1 cost
 	l1Cost.Add(l1Cost, l1TxBlobCost)
 
 	// Here we try to find the actual proposeBlockV2tx happened on L1
 	l1BlockNum, err := p.rpc.L1.BlockNumber(p.ctx)
-	l1TxtotalFee := new(big.Int).SetUint64(0)
-	l1TxGasTipCap := new(big.Int).SetUint64(0)
 
 	if err != nil {
 		log.Error("Failed to fetch L1 block number", "error", err)
-	} else {
-		l1TxtotalFee, l1TxGasTipCap = p.findProposeBlockV2TxHash(l1BlockNum)
 	}
 
 	blockProposedToTaiko := false
@@ -478,6 +488,43 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 	// Record proposal data using metrics
 	// Add to metrics engine
 	// When you have new data for a block
+
+	l1TxtotalFee := new(big.Int).SetUint64(0)
+	l1TxGasTipCap := new(big.Int).SetUint64(0)
+	l1TxAssociatedl2BlockId := uint64(0)
+	if l1BlockNum > 0 {
+		l1TxtotalFee,
+			l1TxGasTipCap,
+			l1TxAssociatedl2BlockId = p.calculateActualProposeBlockV2TxFee(l1BlockNum)
+
+		if l1TxAssociatedl2BlockId > 0 {
+			log.Info("Found proposeBlockV2 call in current L1 block",
+				"actualFeePaid", utils.WeiToEther(l1TxtotalFee),
+				"l2BlockId", l1TxAssociatedl2BlockId,
+				"l1TxGasTipCap", utils.WeiToGWei(l1TxGasTipCap),
+			)
+		}
+	}
+
+	// Fetch the latest L2 block data
+	l2BlockNum := uint64(0)
+	l2NumberOfTxs := int(0)
+
+	latestL2BlockData, err := p.fetchLatestL2BlockData(ctx)
+	if err != nil {
+		log.Warn("Failed to fetch latest L2 block data", "error", err)
+	} else {
+		log.Debug("Latest L2 block data",
+			"blockNumber", latestL2BlockData.Number,
+			"txCount", latestL2BlockData.TxCount,
+			"gasUsed", latestL2BlockData.GasUsed)
+
+		// Use the latest L2 block data for improved metrics
+		// This can be extended to use more of the L2BlockData in the future
+		l2BlockNum = latestL2BlockData.Number
+		l2NumberOfTxs = latestL2BlockData.TxCount
+	}
+
 	metrics.UpdateBlockMetrics(
 		int64(l1BlockNum),                        // L1 block number
 		float64(l1Cost.Int64()),                  // L1 cost as float64
@@ -491,6 +538,8 @@ func (p *Proposer) ProposeOp(ctx context.Context) error {
 		blockProposedToTaiko,           // block proposed to Taiko
 		float64(l1TxtotalFee.Int64()),  //ProposeBlockV2 tx total fee
 		float64(l1TxGasTipCap.Int64()), //ProposeBlockV2 tx gas tip cap
+		int64(l2NumberOfTxs),           // L2 number of txs
+		l1TxAssociatedl2BlockId,        // L2 block id associated with the proposeBlockV2 tx
 	)
 	return nil
 }
@@ -675,90 +724,97 @@ func (p *Proposer) markAsProposed(txHash common.Hash) {
 	}()
 }
 
-func (p *Proposer) findProposeBlockV2TxHash(l1BlockNum uint64) (*big.Int, *big.Int) {
+func (p *Proposer) calculateActualProposeBlockV2TxFee(l1BlockNum uint64) (*big.Int, *big.Int, uint64) {
 	findProposeBlockV2StartTime := time.Now()
 
 	// Method selector for proposeBlockV2 function
-	proposeBlockV2Selector := crypto.Keccak256([]byte("proposeBlockV2(bytes,bytes32)"))[:4]
-
-	// Create a filter query for this block targeting our contract
-	query := ethereum.FilterQuery{
-		FromBlock: new(big.Int).SetUint64(l1BlockNum),
-		ToBlock:   new(big.Int).SetUint64(l1BlockNum),
-		Addresses: []common.Address{p.TaikoL1Address},
+	proposeBlockV2Selector := crypto.Keccak256([]byte("proposeBlockV2(bytes,bytes)"))[:4]
+	// Get the block
+	block, err := p.rpc.L1.BlockByNumber(p.ctx, new(big.Int).SetUint64(l1BlockNum))
+	if err != nil {
+		log.Warn("Failed to get block", "blockNumber", l1BlockNum, "error", err)
+		return new(big.Int).SetUint64(0), new(big.Int).SetUint64(0), 0
 	}
 
-	// Get logs matching our filter
-	logs, err := p.rpc.L1.FilterLogs(p.ctx, query)
 	l1TxtotalFee := new(big.Int).SetUint64(0)
 	txGasTipCap := new(big.Int).SetUint64(0)
+	l2BlockId := uint64(0)
 
 	if err != nil {
 		log.Warn("Failed to filter logs", "error", err)
 	} else {
 		// For each log, get the transaction
-		for _, logEntry := range logs {
+		for _, tx := range block.Transactions() {
 			// Fetch the transaction
-			tx, _, err := p.rpc.L1.TransactionByHash(p.ctx, logEntry.TxHash)
-			if err != nil {
-				continue
-			}
-
 			// Check if it calls proposeBlockV2
-			if len(tx.Data()) >= 4 && bytes.Equal(tx.Data()[:4], proposeBlockV2Selector) {
-				// Get transaction receipt to calculate actual fee
-				receipt, err := p.rpc.L1.TransactionReceipt(p.ctx, tx.Hash())
-				if err != nil {
-					log.Warn("Failed to get receipt", "txHash", tx.Hash().Hex(), "error", err)
-					continue
-				}
+			if tx.To() != nil && *tx.To() == p.TaikoL1Address {
+				inputData := tx.Data()
 
-				// Calculate execution fee
-				executionFee := new(big.Int).Mul(
-					new(big.Int).SetUint64(receipt.GasUsed),
-					receipt.EffectiveGasPrice,
-				)
-
-				// Add blob fee calculation via direct RPC call
-				l1TxtotalFee := new(big.Int).Set(executionFee)
-				blobFee := new(big.Int).SetUint64(0)
-
-				// Check if transaction type is blob transaction (type 3)
-				if tx.Type() == 3 { // Blob transaction type
-					// Make a direct RPC call to get blob info
-					var blobInfo struct {
-						BlobGasUsed uint64   `json:"blobGasUsed"`
-						BlobBaseFee *big.Int `json:"blobBaseFee"`
+				if len(inputData) >= 4 && bytes.Equal(inputData[:4], proposeBlockV2Selector) {
+					log.Info("Found proposeBlockV2 call in current L1 block", "txHash", tx.Hash().Hex())
+					// Get transaction receipt to calculate actual fee
+					receipt, err := p.rpc.L1.TransactionReceipt(p.ctx, tx.Hash())
+					if err != nil {
+						log.Warn("Failed to get receipt", "txHash", tx.Hash().Hex(), "error", err)
+						continue
 					}
 
-					err := p.rpc.L1.CallContext(p.ctx, &blobInfo, "eth_getTransactionBlobInfo", tx.Hash().Hex())
-					if err == nil && blobInfo.BlobGasUsed > 0 {
-						blobFee = new(big.Int).Mul(
-							new(big.Int).SetUint64(blobInfo.BlobGasUsed),
-							blobInfo.BlobBaseFee,
-						)
-						l1TxtotalFee.Add(l1TxtotalFee, blobFee)
-					}
+					// Calculate execution fee
+					executionFee := new(big.Int).Mul(
+						new(big.Int).SetUint64(receipt.GasUsed),
+						receipt.EffectiveGasPrice,
+					)
 
+					l1TxtotalFee.Add(l1TxtotalFee, new(big.Int).Set(executionFee))
 					txGasTipCap = tx.GasTipCap()
+
+					// Check if transaction type is blob transaction (type 3)
+					if tx.Type() == 3 { // Blob transaction type
+						// Make a direct RPC call to get blob info
+						var blobInfo struct {
+							BlobGasUsed uint64   `json:"blobGasUsed"`
+							BlobBaseFee *big.Int `json:"blobBaseFee"`
+						}
+
+						err := p.rpc.L1.CallContext(p.ctx, &blobInfo, "eth_getTransactionBlobInfo", tx.Hash().Hex())
+						if err == nil && blobInfo.BlobGasUsed > 0 {
+							blobFee := new(big.Int).Mul(
+								new(big.Int).SetUint64(blobInfo.BlobGasUsed),
+								blobInfo.BlobBaseFee,
+							)
+							log.Info("Found blob fee", "blobFee", blobFee)
+							// Add blob fee calculation via direct RPC call
+							l1TxtotalFee.Add(l1TxtotalFee, blobFee)
+						}
+					}
+
+					// Log the transaction logs
+					if len(receipt.Logs) > 0 {
+						for _, txLog := range receipt.Logs {
+							if len(txLog.Topics) > 0 {
+								if txLog.Topics[0] == common.HexToHash("0xf4636413c66bd7ef2a1d735c30d22543acb0fba1b0892503bef0734b237c3f37") {
+									// This is a BondDebited event - decode blockId from data
+									// Format: BondDebited(address user, uint256 blockId, uint256 amount)
+									if len(txLog.Data) >= 64 { // At least 2 parameters (32 bytes each)
+										// blockId is the first parameter in the data field
+										blockIdBig := new(big.Int).SetBytes(txLog.Data[:32])
+										l2BlockId = blockIdBig.Uint64()
+										break
+									}
+								}
+							}
+						}
+					} else {
+						log.Info("No logs found for proposeBlockV2 transaction", "txHash", tx.Hash().Hex())
+					}
+					break
 				}
-
-				log.Info("Found proposeBlockV2 call in current L1 block",
-					"blockNum", l1BlockNum,
-					"txHash", tx.Hash().Hex(),
-					"maxPriorityFee", utils.WeiToGWei(tx.GasTipCap()),
-					"baseFee", utils.WeiToGWei(tx.GasPrice()),
-					"gasUsed", receipt.GasUsed,
-					"actualFeePaid", utils.WeiToEther(l1TxtotalFee),
-				)
-
 			}
 		}
 	}
 	findProposeBlockV2Duration := time.Since(findProposeBlockV2StartTime)
 	log.Info("Find proposeBlockV2 call duration", "duration", findProposeBlockV2Duration)
-
-	return l1TxtotalFee, txGasTipCap
+	return l1TxtotalFee, txGasTipCap, l2BlockId
 }
 
 func (p *Proposer) calculateBlobCost() *big.Int {
@@ -796,4 +852,34 @@ func (p *Proposer) calculateBlobCost() *big.Int {
 	}
 
 	return l1BlobCost
+}
+
+func (p *Proposer) fetchLatestL2BlockData(ctx context.Context) (*L2BlockData, error) {
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	// Fetch the latest L2 block
+	latestBlock, err := p.rpc.L2.BlockByNumber(ctxWithTimeout, nil)
+	if err != nil {
+		log.Error("Failed to fetch latest L2 block", "error", err)
+		return nil, err
+	}
+	// Create the L2BlockData struct
+	blockData := &L2BlockData{
+		BaseFee: latestBlock.BaseFee(),
+		Number:  latestBlock.NumberU64(),
+		TxCount: len(latestBlock.Transactions()),
+		GasUsed: latestBlock.GasUsed(),
+	}
+
+	// Log some basic information about the latest block
+	log.Info("Fetched latest L2 block data",
+		"blockNumber", blockData.Number,
+		"timestamp", blockData.Timestamp,
+		"txCount", blockData.TxCount,
+		"gasUsed", blockData.GasUsed,
+		"gasLimit", blockData.GasLimit,
+		"baseFee", blockData.BaseFee)
+
+	return blockData, nil
 }
